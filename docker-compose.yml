@@ -1,0 +1,29 @@
+services:
+  app:
+    image: kaqfa/be_simple_lms-django
+    container_name: lms-app
+    command: python manage.py runserver 0.0.0.0:8000
+    # command: tail -f /dev/null
+    volumes:
+      - ./code:/code
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=True
+    depends_on:
+      - database
+
+  database:
+    image: postgres:16
+    container_name: lms-db
+    environment:
+      - POSTGRES_DB=lms_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5436:5432"
+
+volumes:
+  pg_data:
