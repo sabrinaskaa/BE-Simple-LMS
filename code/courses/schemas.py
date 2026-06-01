@@ -123,3 +123,15 @@ class ProgressOut(Schema):
     content_name: str
     is_completed: bool
     completed_at: datetime
+# ASYNC / REPORT SCHEMAS
+
+class TaskOut(Schema):
+    task_id: str
+    status: str
+    message: str = ""
+
+
+class TaskStatusOut(Schema):
+    task_id: str
+    status: str
+    result: Optional[dict] = None

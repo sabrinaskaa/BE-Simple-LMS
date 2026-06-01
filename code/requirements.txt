@@ -4,3 +4,8 @@ Pillow>=10.0,<11.0
 django-silk==5.1.0
 django-ninja
 PyJWT
+redis>=5.0,<6.0
+django-redis>=5.4,<6.0
+pymongo>=4.6,<5.0
+celery>=5.3,<6.0
+flower>=2.0,<3.0

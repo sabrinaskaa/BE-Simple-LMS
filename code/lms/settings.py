@@ -7,6 +7,7 @@ Melanjutkan dari Modul 04 (Django ORM) dengan tambahan:
 - Media files untuk ImageField dan FileField
 """
 
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -131,3 +132,31 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+
+# =============================================================================
+# Redis, MongoDB, Celery, Email
+# =============================================================================
+REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://mongodb:27017/")
+MONGODB_NAME = os.environ.get("MONGODB_NAME", "lms_logs")
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": REDIS_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        },
+    }
+}
+
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "amqp://guest:guest@rabbitmq:5672//")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+
+EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+DEFAULT_FROM_EMAIL = "noreply@simple-lms.local"

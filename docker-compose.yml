@@ -2,16 +2,23 @@ services:
   app:
     image: kaqfa/be_simple_lms-django
     container_name: lms-app
-    command: python manage.py runserver 0.0.0.0:8000
-    # command: tail -f /dev/null
+    command: sh -c "pip install -r requirements.txt && python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
     volumes:
       - ./code:/code
     ports:
       - "8000:8000"
     environment:
       - DEBUG=True
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MONGODB_URI=mongodb://mongodb:27017/
+      - MONGODB_NAME=lms_logs
     depends_on:
       - database
+      - redis
+      - mongodb
+      - rabbitmq
 
   database:
     image: postgres:16
@@ -25,5 +32,82 @@ services:
     ports:
       - "5436:5432"
 
+  redis:
+    image: redis:7-alpine
+    container_name: lms-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  mongodb:
+    image: mongo:7
+    container_name: lms-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: lms-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  celery-worker:
+    image: kaqfa/be_simple_lms-django
+    container_name: lms-celery-worker
+    command: sh -c "pip install -r requirements.txt && celery -A lms worker -l info"
+    volumes:
+      - ./code:/code
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MONGODB_URI=mongodb://mongodb:27017/
+      - MONGODB_NAME=lms_logs
+    depends_on:
+      - app
+      - redis
+      - mongodb
+      - rabbitmq
+
+  celery-beat:
+    image: kaqfa/be_simple_lms-django
+    container_name: lms-celery-beat
+    command: sh -c "pip install -r requirements.txt && celery -A lms beat -l info"
+    volumes:
+      - ./code:/code
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MONGODB_URI=mongodb://mongodb:27017/
+      - MONGODB_NAME=lms_logs
+    depends_on:
+      - app
+      - redis
+      - mongodb
+      - rabbitmq
+
+  flower:
+    image: kaqfa/be_simple_lms-django
+    container_name: lms-flower
+    command: sh -c "pip install -r requirements.txt && celery -A lms flower --port=5555"
+    volumes:
+      - ./code:/code
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - celery-worker
+      - rabbitmq
+
 volumes:
   pg_data:
+  redis_data:
+  mongo_data:
