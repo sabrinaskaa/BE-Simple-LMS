@@ -1,6 +1,7 @@
 # Cache Report - Redis Weather API
 
 ## 1. Screenshot
+<img width="1920" height="1080" alt="Screenshot (28)" src="https://github.com/user-attachments/assets/88fe74fd-f771-47e1-b7c1-740ab45efdd1" />
 
 ## 2. Kode yang Dimodifikasi
 
