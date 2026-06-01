@@ -1,23 +1,3 @@
-"""
-Management command untuk mengisi database dengan data dummy.
-
-Jalankan dengan:
-    python manage.py seed_data
-
-Data yang dibuat:
-    - 20 User pengajar (dosen01 - dosen20)
-    - 80 User mahasiswa (mhs001 - mhs080)
-    - 100 Course (mata kuliah)
-    - 500 CourseMember (anggota kelas)
-    - 300 CourseContent (konten/materi kelas)
-    - 1000+ Comment (komentar pada konten)
-
-Semua operasi INSERT menggunakan bulk_create (sesuai Modul 05 Bagian 6).
-Command ini idempoten: aman dijalankan berulang kali tanpa membuat duplikat.
-
-Referensi: Modul 05 - Bagian 6: Bulk Operations
-"""
-
 import random
 from django.contrib.auth.hashers import make_password
 from django.core.management.base import BaseCommand

@@ -1,12 +1,3 @@
-"""
-Django settings untuk Simple LMS - Lab 05: Optimasi Database
-
-Melanjutkan dari Modul 04 (Django ORM) dengan tambahan:
-- Database PostgreSQL (bukan SQLite)
-- Django Silk untuk query profiling
-- Media files untuk ImageField dan FileField
-"""
-
 import os
 from pathlib import Path
 
