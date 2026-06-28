@@ -1,0 +1,1272 @@
+{
+  "info": {
+    "_postman_id": "simple-lms-api-collection-v1",
+    "name": "Simple LMS API",
+    "description": "REST API Simple LMS dengan JWT Authentication, Redis Caching, MongoDB Logs, Celery Async Tasks, dan Rate Limiting.\n\n**Base URL**: `{{base_url}}`\n\n## Setup\n1. Import collection ini ke Postman\n2. Import environment `Simple LMS - Environment`\n3. Set `base_url` ke `http://localhost:8000/api/v1`\n4. Jalankan **Register** → **Login** → token otomatis tersimpan ke `access_token` dan `refresh_token`\n\n## Autentikasi\nSemua endpoint protected menggunakan **Bearer Token** dari variabel `{{access_token}}`.\n\n## Swagger UI\nAkses dokumentasi interaktif di: `http://localhost:8000/api/v1/docs`",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000/api/v1",
+      "type": "string",
+      "description": "Base URL API. Ganti sesuai environment (dev/staging/prod)."
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string",
+      "description": "JWT Access Token — diisi otomatis setelah login."
+    },
+    {
+      "key": "refresh_token",
+      "value": "",
+      "type": "string",
+      "description": "JWT Refresh Token — diisi otomatis setelah login."
+    },
+    {
+      "key": "course_id",
+      "value": "1",
+      "type": "string",
+      "description": "ID course untuk testing endpoint course-specific."
+    },
+    {
+      "key": "enrollment_id",
+      "value": "1",
+      "type": "string",
+      "description": "ID enrollment untuk testing endpoint enrollment-specific."
+    },
+    {
+      "key": "content_id",
+      "value": "1",
+      "type": "string",
+      "description": "ID content untuk testing endpoint content-specific."
+    },
+    {
+      "key": "task_id",
+      "value": "",
+      "type": "string",
+      "description": "Celery Task ID — diisi otomatis setelah trigger async task."
+    }
+  ],
+  "item": [
+    {
+      "name": "🔐 Authentication",
+      "description": "Endpoint untuk autentikasi: register, login, refresh token, dan profile management.",
+      "item": [
+        {
+          "name": "Register User Baru",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"john_doe\",\n  \"password\": \"SecurePass123!\",\n  \"email\": \"john@example.com\",\n  \"first_name\": \"John\",\n  \"last_name\": \"Doe\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/register",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Mendaftarkan user baru ke sistem. User akan otomatis dimasukkan ke group **Student**.\n\n**Response 201**: Data user yang baru dibuat (id, username, email, roles).\n**Response 400**: Username atau email sudah digunakan."
+          },
+          "response": [
+            {
+              "name": "201 - Register Berhasil",
+              "originalRequest": {
+                "method": "POST",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"username\": \"john_doe\",\n  \"password\": \"SecurePass123!\",\n  \"email\": \"john@example.com\",\n  \"first_name\": \"John\",\n  \"last_name\": \"Doe\"\n}"
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 2,\n  \"username\": \"john_doe\",\n  \"email\": \"john@example.com\",\n  \"first_name\": \"John\",\n  \"last_name\": \"Doe\",\n  \"roles\": [\"Student\"]\n}"
+            },
+            {
+              "name": "400 - Username Sudah Digunakan",
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Username sudah digunakan\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    pm.collectionVariables.set('access_token', json.access);",
+                  "    pm.collectionVariables.set('refresh_token', json.refresh);",
+                  "    console.log('✅ Token tersimpan ke collection variables.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"john_doe\",\n  \"password\": \"SecurePass123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Login dengan username dan password. Mengembalikan JWT **access token** (berlaku 30 menit) dan **refresh token** (berlaku 7 hari).\n\nToken otomatis disimpan ke variabel `access_token` dan `refresh_token` via test script.\n\n**Rate limit**: 5 request per menit per IP.\n\n**Response 200**: access + refresh token.\n**Response 401**: Kredensial tidak valid.\n**Response 429**: Rate limit terlampaui."
+          },
+          "response": [
+            {
+              "name": "200 - Login Berhasil",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"access\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\",\n  \"refresh\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n}"
+            },
+            {
+              "name": "401 - Kredensial Salah",
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Username atau password salah\"\n}"
+            },
+            {
+              "name": "429 - Rate Limit",
+              "status": "Too Many Requests",
+              "code": 429,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Terlalu banyak request. Coba lagi dalam 45 detik.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Refresh Access Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    pm.collectionVariables.set('access_token', json.access);",
+                  "    console.log('✅ Access token diperbarui.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/refresh",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Mendapatkan access token baru menggunakan refresh token yang masih valid. Gunakan ini ketika access token sudah expired.\n\n**Response 200**: Access token baru.\n**Response 401**: Refresh token tidak valid atau sudah expired."
+          },
+          "response": [
+            {
+              "name": "200 - Token Diperbarui",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"access\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n}"
+            },
+            {
+              "name": "401 - Token Expired",
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Refresh token sudah expired\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get My Profile",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/auth/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "description": "Mendapatkan data profil user yang sedang login.\n\n**Auth required**: Bearer Token\n\n**Response 200**: Data user (id, username, email, nama, roles).\n**Response 401**: Token tidak valid atau tidak diberikan."
+          },
+          "response": [
+            {
+              "name": "200 - Data Profil",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 2,\n  \"username\": \"john_doe\",\n  \"email\": \"john@example.com\",\n  \"first_name\": \"John\",\n  \"last_name\": \"Doe\",\n  \"roles\": [\"Student\"]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update My Profile",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"john.doe@newemail.com\",\n  \"first_name\": \"Johnny\",\n  \"last_name\": \"Doe\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "description": "Update profil user yang sedang login. Semua field bersifat opsional (partial update).\n\n**Auth required**: Bearer Token\n\n**Field yang bisa diupdate**: email, first_name, last_name (password tidak bisa diubah melalui endpoint ini).\n\n**Response 200**: Data user setelah diupdate.\n**Response 400**: Email sudah digunakan user lain.\n**Response 401**: Token tidak valid."
+          },
+          "response": [
+            {
+              "name": "200 - Profil Diupdate",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 2,\n  \"username\": \"john_doe\",\n  \"email\": \"john.doe@newemail.com\",\n  \"first_name\": \"Johnny\",\n  \"last_name\": \"Doe\",\n  \"roles\": [\"Student\"]\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "📚 Courses — Public",
+      "description": "Endpoint courses yang dapat diakses tanpa autentikasi.",
+      "item": [
+        {
+          "name": "List Semua Courses",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses?page=1&page_size=10&ordering=-created_at",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "courses"
+              ],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "",
+                  "description": "Cari berdasarkan nama atau deskripsi course (case-insensitive)",
+                  "disabled": true
+                },
+                {
+                  "key": "instructor_id",
+                  "value": "",
+                  "description": "Filter berdasarkan ID instructor/teacher",
+                  "disabled": true
+                },
+                {
+                  "key": "min_price",
+                  "value": "",
+                  "description": "Filter harga minimum",
+                  "disabled": true
+                },
+                {
+                  "key": "max_price",
+                  "value": "",
+                  "description": "Filter harga maksimum",
+                  "disabled": true
+                },
+                {
+                  "key": "ordering",
+                  "value": "-created_at",
+                  "description": "Urutan. Pilihan: name, -name, price, -price, created_at, -created_at"
+                },
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Nomor halaman (mulai dari 1)"
+                },
+                {
+                  "key": "page_size",
+                  "value": "10",
+                  "description": "Jumlah item per halaman (1-100)"
+                }
+              ]
+            },
+            "description": "Mendapatkan daftar semua course dengan fitur:\n- **Pagination**: `page` dan `page_size`\n- **Search**: Filter berdasarkan nama/deskripsi\n- **Filter harga**: `min_price`, `max_price`\n- **Filter instructor**: `instructor_id`\n- **Ordering**: `name`, `-name`, `price`, `-price`, `created_at`, `-created_at`\n\n⚡ **Redis Cache**: Response di-cache selama 5 menit.\n\n⚠️ **Rate limit**: 60 req/menit (anonymous), 120 req/menit (authenticated)."
+          },
+          "response": [
+            {
+              "name": "200 - Daftar Courses",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"total\": 25,\n  \"page\": 1,\n  \"page_size\": 10,\n  \"data\": [\n    {\n      \"id\": 1,\n      \"name\": \"Pemrograman Web Dasar\",\n      \"description\": \"Belajar HTML, CSS, dan JavaScript dari nol.\",\n      \"price\": 150000,\n      \"image\": null,\n      \"teacher\": {\n        \"id\": 1,\n        \"username\": \"instructor_andi\",\n        \"first_name\": \"Andi\",\n        \"last_name\": \"Saputra\",\n        \"email\": \"andi@lms.com\"\n      },\n      \"created_at\": \"2025-01-15T08:00:00Z\",\n      \"updated_at\": \"2025-01-20T10:30:00Z\"\n    }\n  ]\n}"
+            },
+            {
+              "name": "400 - Parameter Ordering Tidak Valid",
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Parameter ordering tidak valid\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Detail Course",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "courses",
+                "{{course_id}}"
+              ]
+            },
+            "description": "Mendapatkan detail satu course berdasarkan ID.\n\n⚡ **Redis Cache**: Response di-cache selama 5 menit.\n\n**Response 200**: Data course lengkap dengan info teacher.\n**Response 404**: Course tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "200 - Detail Course",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 1,\n  \"name\": \"Pemrograman Web Dasar\",\n  \"description\": \"Belajar HTML, CSS, dan JavaScript dari nol.\",\n  \"price\": 150000,\n  \"image\": null,\n  \"teacher\": {\n    \"id\": 1,\n    \"username\": \"instructor_andi\",\n    \"first_name\": \"Andi\",\n    \"last_name\": \"Saputra\",\n    \"email\": \"andi@lms.com\"\n  },\n  \"created_at\": \"2025-01-15T08:00:00Z\",\n  \"updated_at\": \"2025-01-20T10:30:00Z\"\n}"
+            },
+            {
+              "name": "404 - Course Tidak Ditemukan",
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Course tidak ditemukan\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🔒 Courses — Protected",
+      "description": "Endpoint courses yang memerlukan autentikasi dan role tertentu.",
+      "item": [
+        {
+          "name": "Buat Course Baru (Instructor Only)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Pemrograman Python Lanjut\",\n  \"description\": \"Deep dive ke Python: OOP, decorators, async, dan lebih banyak lagi.\",\n  \"price\": 200000,\n  \"image\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/courses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "courses"
+              ]
+            },
+            "description": "Membuat course baru. Hanya bisa dilakukan oleh user dengan role **Instructor** atau **Admin**.\n\nUser yang membuat course otomatis menjadi teacher/owner course tersebut.\n\n**Auth required**: Bearer Token (role Instructor/Admin)\n\n**Response 201**: Data course yang baru dibuat.\n**Response 400**: Harga negatif atau data tidak valid.\n**Response 401**: Token tidak valid.\n**Response 403**: User bukan Instructor/Admin.\n**Response 422**: Validasi Pydantic gagal."
+          },
+          "response": [
+            {
+              "name": "201 - Course Dibuat",
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 5,\n  \"name\": \"Pemrograman Python Lanjut\",\n  \"description\": \"Deep dive ke Python: OOP, decorators, async, dan lebih banyak lagi.\",\n  \"price\": 200000,\n  \"image\": null,\n  \"teacher\": {\n    \"id\": 3,\n    \"username\": \"instructor_budi\",\n    \"first_name\": \"Budi\",\n    \"last_name\": \"Santoso\",\n    \"email\": \"budi@lms.com\"\n  },\n  \"created_at\": \"2025-06-28T11:00:00Z\",\n  \"updated_at\": \"2025-06-28T11:00:00Z\"\n}"
+            },
+            {
+              "name": "403 - Bukan Instructor",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Hanya instructor yang boleh mengakses endpoint ini\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update Course (Owner/Admin Only)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Pemrograman Python Lanjut - Updated\",\n  \"price\": 175000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "courses",
+                "{{course_id}}"
+              ]
+            },
+            "description": "Update partial data course. Hanya bisa dilakukan oleh **owner course** (teacher yang membuat) atau **Admin**.\n\nSemua field bersifat opsional — kirim hanya field yang ingin diubah.\n\n**Auth required**: Bearer Token (owner/Admin)\n\n**Response 200**: Data course setelah diupdate.\n**Response 400**: Harga negatif.\n**Response 401**: Token tidak valid.\n**Response 403**: Bukan owner atau admin.\n**Response 404**: Course tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "200 - Course Diupdate",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 5,\n  \"name\": \"Pemrograman Python Lanjut - Updated\",\n  \"description\": \"Deep dive ke Python: OOP, decorators, async, dan lebih banyak lagi.\",\n  \"price\": 175000,\n  \"image\": null,\n  \"teacher\": {\n    \"id\": 3,\n    \"username\": \"instructor_budi\",\n    \"first_name\": \"Budi\",\n    \"last_name\": \"Santoso\",\n    \"email\": \"budi@lms.com\"\n  },\n  \"created_at\": \"2025-06-28T11:00:00Z\",\n  \"updated_at\": \"2025-06-28T12:00:00Z\"\n}"
+            },
+            {
+              "name": "403 - Bukan Owner/Admin",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Hanya owner course atau admin yang boleh mengedit course\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Hapus Course (Admin/Owner Only)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "courses",
+                "{{course_id}}"
+              ]
+            },
+            "description": "Menghapus course. Hanya bisa dilakukan oleh **owner course** atau **Admin**.\n\n⚠️ Operasi ini **tidak bisa dibatalkan**. Cache course juga akan dihapus.\n\n**Auth required**: Bearer Token (owner/Admin)\n\n**Response 200**: Pesan konfirmasi penghapusan.\n**Response 401**: Token tidak valid.\n**Response 403**: Bukan owner atau admin.\n**Response 404**: Course tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "200 - Course Dihapus",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"message\": \"Course berhasil dihapus\"\n}"
+            },
+            {
+              "name": "403 - Tidak Diizinkan",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Hanya owner course atau admin yang boleh menghapus course\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "📋 Enrollments",
+      "description": "Endpoint untuk pendaftaran (enrollment) ke course dan tracking progress.",
+      "item": [
+        {
+          "name": "Enroll ke Course (Student)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"course_id\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/enrollments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "enrollments"
+              ]
+            },
+            "description": "Mendaftarkan user yang sedang login ke sebuah course. Hanya user dengan role **Student** (atau Instructor/Admin) yang bisa enroll.\n\nSetelah enroll:\n- Email konfirmasi dikirim secara **asynchronous** via Celery\n- Aktivitas di-log ke MongoDB\n- Cache course diinvalidasi\n\n**Auth required**: Bearer Token (Student/Instructor/Admin)\n\n**Response 201**: Data enrollment yang dibuat.\n**Response 400**: Sudah terdaftar di course ini.\n**Response 403**: User bukan Student.\n**Response 404**: Course tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "201 - Enrollment Berhasil",
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 10,\n  \"course_id\": 1,\n  \"course_name\": \"Pemrograman Web Dasar\",\n  \"user_id\": 2,\n  \"username\": \"john_doe\",\n  \"roles\": \"std\"\n}"
+            },
+            {
+              "name": "400 - Sudah Terdaftar",
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Anda sudah terdaftar di course ini\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Lihat Course Saya",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/enrollments/my-courses?page=1&page_size=10",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "enrollments",
+                "my-courses"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Nomor halaman"
+                },
+                {
+                  "key": "page_size",
+                  "value": "10",
+                  "description": "Jumlah item per halaman (1-100)"
+                }
+              ]
+            },
+            "description": "Mendapatkan daftar course yang sudah diikuti oleh user yang sedang login, dengan pagination.\n\nHasil diurutkan berdasarkan nama course (ascending).\n\n**Auth required**: Bearer Token\n\n**Response 200**: Daftar enrollment dengan pagination."
+          },
+          "response": [
+            {
+              "name": "200 - Daftar Enrollment",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"total\": 3,\n  \"page\": 1,\n  \"page_size\": 10,\n  \"data\": [\n    {\n      \"id\": 10,\n      \"course_id\": 1,\n      \"course_name\": \"Pemrograman Web Dasar\",\n      \"user_id\": 2,\n      \"username\": \"john_doe\",\n      \"roles\": \"std\"\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Tandai Lesson Selesai",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content_id\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/enrollments/{{enrollment_id}}/progress",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "enrollments",
+                "{{enrollment_id}}",
+                "progress"
+              ]
+            },
+            "description": "Menandai sebuah lesson (CourseContent) sebagai **selesai** untuk enrollment tertentu.\n\n- Hanya bisa dilakukan oleh **pemilik enrollment** tersebut.\n- Jika semua lesson dalam course sudah selesai, **sertifikat akan di-generate secara async** via Celery.\n\n**Path Params**:\n- `enrollment_id`: ID enrollment yang dimiliki user\n\n**Body**:\n- `content_id`: ID konten/lesson yang ingin ditandai selesai (harus milik course yang sama)\n\n**Auth required**: Bearer Token\n\n**Response 201**: Data progress yang dibuat/diupdate.\n**Response 403**: Enrollment bukan milik user.\n**Response 404**: Enrollment atau content tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "201 - Progress Dicatat",
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 5,\n  \"enrollment_id\": 10,\n  \"content_id\": 1,\n  \"content_name\": \"Pengenalan HTML\",\n  \"is_completed\": true,\n  \"completed_at\": \"2025-06-28T11:30:00Z\"\n}"
+            },
+            {
+              "name": "403 - Bukan Pemilik Enrollment",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Anda tidak boleh mengubah progress enrollment milik user lain\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "⚙️ Async Tasks",
+      "description": "Endpoint untuk memicu dan memantau background tasks yang dijalankan via Celery/RabbitMQ.",
+      "item": [
+        {
+          "name": "Export Course Report (Owner/Admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "    const json = pm.response.json();",
+                  "    pm.collectionVariables.set('task_id', json.task_id);",
+                  "    console.log('✅ Task ID tersimpan:', json.task_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/export-report",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "courses",
+                "{{course_id}}",
+                "export-report"
+              ]
+            },
+            "description": "Memicu export report course ke file CSV secara **asynchronous**. Hanya bisa dilakukan oleh **owner course** atau **Admin**.\n\nTask ID tersimpan otomatis ke variabel `task_id` via test script. Gunakan endpoint **Get Task Status** untuk cek hasilnya.\n\n**Auth required**: Bearer Token (owner/Admin)\n\n**Response 202**: Task ID dan status awal.\n**Response 403**: Bukan owner/admin.\n**Response 404**: Course tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "202 - Task Dijadwalkan",
+              "status": "Accepted",
+              "code": 202,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"task_id\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"status\": \"queued\",\n  \"message\": \"Export course report sedang diproses\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update Course Statistics (Admin Only)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "    const json = pm.response.json();",
+                  "    pm.collectionVariables.set('task_id', json.task_id);",
+                  "    console.log('✅ Task ID tersimpan:', json.task_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/tasks/update-course-statistics",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "tasks",
+                "update-course-statistics"
+              ]
+            },
+            "description": "Memicu update statistik semua course ke MongoDB secara **asynchronous**. **Admin Only**.\n\nTask ini menghitung jumlah member, content, dan lesson yang diselesaikan untuk setiap course.\n\n**Auth required**: Bearer Token (Admin)\n\n**Response 202**: Task ID.\n**Response 403**: Bukan Admin."
+          },
+          "response": [
+            {
+              "name": "202 - Task Dijadwalkan",
+              "status": "Accepted",
+              "code": 202,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"task_id\": \"f9e8d7c6-b5a4-3210-fedc-ba9876543210\",\n  \"status\": \"queued\",\n  \"message\": \"Update statistik course sedang diproses\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Cek Status Task",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/tasks/{{task_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "tasks",
+                "{{task_id}}"
+              ]
+            },
+            "description": "Mengecek status task Celery berdasarkan `task_id`.\n\n**Status yang mungkin**:\n- `PENDING` — Task belum dimulai atau ID tidak ditemukan\n- `STARTED` — Task sedang berjalan\n- `SUCCESS` — Task selesai dengan sukses\n- `FAILURE` — Task gagal\n- `RETRY` — Task sedang di-retry\n\n**Auth required**: Bearer Token\n\n**Response 200**: Status dan result (jika sudah selesai)."
+          },
+          "response": [
+            {
+              "name": "200 - Task Selesai",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"task_id\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"status\": \"SUCCESS\",\n  \"result\": {\n    \"status\": \"generated\",\n    \"file\": \"/app/media/reports/course_report_1_20250628110000.csv\"\n  }\n}"
+            },
+            {
+              "name": "200 - Task Masih Berjalan",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"task_id\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"status\": \"PENDING\",\n  \"result\": null\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "📊 Reports (Admin Only)",
+      "description": "Endpoint laporan berbasis MongoDB. Hanya bisa diakses oleh Admin.",
+      "item": [
+        {
+          "name": "Activity Report",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/reports/activity?limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "reports",
+                "activity"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Jumlah aksi teratas yang ditampilkan"
+                }
+              ]
+            },
+            "description": "Mendapatkan laporan aktivitas user dari MongoDB. Menampilkan jumlah per jenis aksi (register, login, create_course, enroll_course, dll), diurutkan dari yang paling banyak.\n\n**Auth required**: Bearer Token (Admin)\n\n**Response**: Array of `{action, total}` dari MongoDB aggregation."
+          },
+          "response": [
+            {
+              "name": "200 - Activity Report",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "[\n  {\"action\": \"login\", \"total\": 145},\n  {\"action\": \"view_course_detail\", \"total\": 89},\n  {\"action\": \"enroll_course\", \"total\": 34},\n  {\"action\": \"lesson_completed\", \"total\": 22},\n  {\"action\": \"register\", \"total\": 15}\n]"
+            }
+          ]
+        },
+        {
+          "name": "Learning Report",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/reports/learning?limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "reports",
+                "learning"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Jumlah event teratas yang ditampilkan"
+                }
+              ]
+            },
+            "description": "Mendapatkan laporan learning analytics dari MongoDB. Menampilkan kombinasi course_id + event (enrolled, lesson_completed, certificate_generated) beserta jumlahnya.\n\n**Auth required**: Bearer Token (Admin)\n\n**Response**: Array of `{course_id, event, total}` dari MongoDB aggregation."
+          },
+          "response": [
+            {
+              "name": "200 - Learning Report",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "[\n  {\"course_id\": 1, \"event\": \"lesson_completed\", \"total\": 67},\n  {\"course_id\": 1, \"event\": \"enrolled\", \"total\": 34},\n  {\"course_id\": 2, \"event\": \"enrolled\", \"total\": 28},\n  {\"course_id\": 1, \"event\": \"certificate_generated\", \"total\": 5}\n]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "📁 Files",
+      "description": "Endpoint untuk upload dan download file attachment pada konten course.",
+      "item": [
+        {
+          "name": "Upload File ke Content (Owner/Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "File yang akan diupload. Maks 10MB. Format: .pdf, .doc, .docx, .ppt, .pptx, .mp4, .png, .jpg, .jpeg"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/content/{{content_id}}/upload",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "courses",
+                "{{course_id}}",
+                "content",
+                "{{content_id}}",
+                "upload"
+              ]
+            },
+            "description": "Mengupload file attachment ke konten course tertentu. Hanya bisa dilakukan oleh **owner course** atau **Admin**.\n\n**Format yang didukung**: `.pdf`, `.doc`, `.docx`, `.ppt`, `.pptx`, `.mp4`, `.png`, `.jpg`, `.jpeg`\n\n**Ukuran maksimum**: 10 MB\n\n⚠️ **Rate limit**: Berlaku per-prefix `upload`.\n\n**Auth required**: Bearer Token (owner/Admin)\n\n**Request**: `multipart/form-data` dengan field `file`.\n\n**Response 200**: Info file yang berhasil diupload.\n**Response 400**: File terlalu besar atau format tidak didukung.\n**Response 403**: Bukan owner/admin.\n**Response 404**: Course atau content tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "200 - Upload Berhasil",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"content_id\": 1,\n  \"filename\": \"modul_1_pengenalan_html.pdf\",\n  \"url\": \"http://localhost:8000/media/modul_1_pengenalan_html.pdf\",\n  \"size\": 204800\n}"
+            },
+            {
+              "name": "400 - File Terlalu Besar",
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"File terlalu besar. Maksimum 10 MB.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Download File dari Content",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/content/{{content_id}}/download",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "courses",
+                "{{course_id}}",
+                "content",
+                "{{content_id}}",
+                "download"
+              ]
+            },
+            "description": "Mengunduh file attachment dari konten course.\n\n**Akses diizinkan untuk**:\n- Owner course (teacher)\n- Admin\n- Student yang sudah **enroll** ke course\n\n**Auth required**: Bearer Token\n\n**Response**: Binary file download dengan header `Content-Disposition: attachment`.\n**Response 403**: Belum enroll ke course.\n**Response 404**: File tidak tersedia atau content tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "200 - File Download",
+              "status": "OK",
+              "code": 200,
+              "body": "(binary file)"
+            },
+            {
+              "name": "403 - Belum Enroll",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Anda harus enroll ke course ini untuk mengunduh file\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🧪 Lab Benchmarks",
+      "description": "Endpoint khusus untuk benchmarking performa query. Menunjukkan perbedaan antara pendekatan baseline (N+1) dan optimized (select_related, annotate, bulk ops).",
+      "item": [
+        {
+          "name": "Course List — Baseline (N+1)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/course-list/baseline/",
+              "raw": "http://localhost:8000/lab/course-list/baseline/"
+            },
+            "description": "❌ **Baseline — N+1 Problem**: Mengambil daftar course tanpa `select_related`. Setiap akses `c.teacher.username` memicu query terpisah.\n\n**Base URL**: `http://localhost:8000` (bukan `api/v1`)"
+          }
+        },
+        {
+          "name": "Course List — Optimized (select_related)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/course-list/optimized/",
+              "raw": "http://localhost:8000/lab/course-list/optimized/"
+            },
+            "description": "✅ **Optimized — select_related**: Mengambil daftar course dengan `select_related('teacher')`. Hanya 1 query SQL untuk semua data.\n\n**Base URL**: `http://localhost:8000` (bukan `api/v1`)"
+          }
+        },
+        {
+          "name": "Course Members — Baseline",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/course-members/baseline/",
+              "raw": "http://localhost:8000/lab/course-members/baseline/"
+            },
+            "description": "❌ **Baseline**: Menghitung member per course tanpa prefetch — N+1 queries."
+          }
+        },
+        {
+          "name": "Course Members — Optimized",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/course-members/optimized/",
+              "raw": "http://localhost:8000/lab/course-members/optimized/"
+            },
+            "description": "✅ **Optimized**: Menggunakan `prefetch_related('coursemember_set')`."
+          }
+        },
+        {
+          "name": "Course Dashboard — Baseline",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/course-dashboard/baseline/",
+              "raw": "http://localhost:8000/lab/course-dashboard/baseline/"
+            },
+            "description": "❌ **Baseline**: Dashboard dengan looping Python untuk kalkulasi statistik."
+          }
+        },
+        {
+          "name": "Course Dashboard — Optimized",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/course-dashboard/optimized/",
+              "raw": "http://localhost:8000/lab/course-dashboard/optimized/"
+            },
+            "description": "✅ **Optimized**: Menggunakan `annotate()` dan `aggregate()` — kalkulasi di database."
+          }
+        },
+        {
+          "name": "Bulk Insert — Baseline",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/bulk-insert/baseline/",
+              "raw": "http://localhost:8000/lab/bulk-insert/baseline/"
+            },
+            "description": "❌ **Baseline**: Insert 1000 content satu per satu (1000 INSERT queries)."
+          }
+        },
+        {
+          "name": "Bulk Insert — Optimized",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/bulk-insert/optimized/",
+              "raw": "http://localhost:8000/lab/bulk-insert/optimized/"
+            },
+            "description": "✅ **Optimized**: Insert 1000 content menggunakan `bulk_create(batch_size=500)` — hanya 2 queries."
+          }
+        },
+        {
+          "name": "Bulk Update — Baseline",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/bulk-update/baseline/",
+              "raw": "http://localhost:8000/lab/bulk-update/baseline/"
+            },
+            "description": "❌ **Baseline**: Update harga semua course satu per satu."
+          }
+        },
+        {
+          "name": "Bulk Update — Optimized",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/lab/bulk-update/optimized/",
+              "raw": "http://localhost:8000/lab/bulk-update/optimized/"
+            },
+            "description": "✅ **Optimized**: Update harga menggunakan `Course.objects.all().update(price=F('price') * 1.1)` — 1 query."
+          }
+        }
+      ]
+    }
+  ]
+}
