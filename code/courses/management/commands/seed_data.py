@@ -1,7 +1,7 @@
 import random
 from django.contrib.auth.hashers import make_password
 from django.core.management.base import BaseCommand
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Group, User
 from courses.models import Course, CourseMember, CourseContent, Comment
 
 
@@ -119,8 +119,9 @@ class Command(BaseCommand):
         self.stdout.write(self.style.HTTP_INFO('  Seeding Data - Lab 05: Optimasi Database'))
         self.stdout.write(self.style.HTTP_INFO('=' * 55))
 
-        teachers = self._seed_teachers()
-        students = self._seed_students()
+        groups = self._seed_groups()
+        teachers = self._seed_teachers(groups['instructor'])
+        students = self._seed_students(groups['student'])
         courses = self._seed_courses(teachers)
         members = self._seed_members(courses, students)
         contents = self._seed_contents(courses)
@@ -130,14 +131,55 @@ class Command(BaseCommand):
 
         self.stdout.write('')
         self.stdout.write(self.style.SUCCESS('Seeding selesai! Sekarang coba:'))
-        self.stdout.write('  http://localhost:8000/courses/          ← amati query di Silk')
-        self.stdout.write('  http://localhost:8000/silk/             ← dashboard profiling')
+        self.stdout.write('  http://localhost:8000/api/v1/docs       ← Swagger UI')
         self.stdout.write('  http://localhost:8000/admin/            ← manajemen data')
+        self.stdout.write('')
+        self.stdout.write(self.style.SUCCESS('Akun demo yang tersedia:'))
+        self.stdout.write('  Admin     : admin / admin123')
+        self.stdout.write('  Instructor: dosen01 - dosen20 / password123')
+        self.stdout.write('  Student   : mhs001 - mhs080 / password123')
+
+    # -------------------------------------------------------------------------
+    # Step 0: Buat Django Groups untuk RBAC (Admin, Instructor, Student)
+    # -------------------------------------------------------------------------
+    def _seed_groups(self):
+        self.stdout.write('\n[0/6] Membuat Django Groups (Admin, Instructor, Student)...')
+
+        admin_group, admin_created = Group.objects.get_or_create(name='Admin')
+        instructor_group, instructor_created = Group.objects.get_or_create(name='Instructor')
+        student_group, student_created = Group.objects.get_or_create(name='Student')
+
+        # Buat superuser 'admin' sebagai akun demo Admin jika belum ada
+        if not User.objects.filter(username='admin').exists():
+            admin_user = User.objects.create_superuser(
+                username='admin',
+                email='admin@lms.ac.id',
+                password='admin123',
+                first_name='Super',
+                last_name='Admin',
+            )
+            admin_user.groups.add(admin_group)
+            self.stdout.write('  → Superuser "admin" dibuat (password: admin123)')
+        else:
+            self.stdout.write('  → Superuser "admin" sudah ada (skip)')
+
+        statuses = [
+            f'Admin({"baru" if admin_created else "sudah ada"})',
+            f'Instructor({"baru" if instructor_created else "sudah ada"})',
+            f'Student({"baru" if student_created else "sudah ada"})',
+        ]
+        self.stdout.write(f'  → Groups: {", ".join(statuses)}')
+
+        return {
+            'admin': admin_group,
+            'instructor': instructor_group,
+            'student': student_group,
+        }
 
     # -------------------------------------------------------------------------
     # Step 1: Buat 20 User pengajar
     # -------------------------------------------------------------------------
-    def _seed_teachers(self):
+    def _seed_teachers(self, instructor_group):
         self.stdout.write('\n[1/6] Membuat pengajar (dosen01 - dosen20)...')
 
         existing = set(
@@ -166,13 +208,25 @@ class Command(BaseCommand):
             User.objects.bulk_create(to_create, ignore_conflicts=True)
 
         teachers = list(User.objects.filter(username__startswith='dosen'))
+
+        # Assign group Instructor ke semua dosen yang belum punya group tersebut
+        # Gunakan set() untuk efisiensi — hindari query N+1 via through table
+        already_in_group = set(
+            instructor_group.user_set.filter(username__startswith='dosen')
+            .values_list('id', flat=True)
+        )
+        to_assign = [t for t in teachers if t.id not in already_in_group]
+        if to_assign:
+            instructor_group.user_set.add(*to_assign)
+            self.stdout.write(f'  → {len(to_assign)} dosen di-assign ke group "Instructor"')
+
         self.stdout.write(f'  → {len(teachers)} pengajar tersedia')
         return teachers
 
     # -------------------------------------------------------------------------
     # Step 2: Buat 80 User mahasiswa
     # -------------------------------------------------------------------------
-    def _seed_students(self):
+    def _seed_students(self, student_group):
         self.stdout.write('\n[2/6] Membuat mahasiswa (mhs001 - mhs080)...')
 
         existing = set(
@@ -196,6 +250,17 @@ class Command(BaseCommand):
             User.objects.bulk_create(to_create, ignore_conflicts=True)
 
         students = list(User.objects.filter(username__startswith='mhs'))
+
+        # Assign group Student ke semua mahasiswa yang belum punya group tersebut
+        already_in_group = set(
+            student_group.user_set.filter(username__startswith='mhs')
+            .values_list('id', flat=True)
+        )
+        to_assign = [s for s in students if s.id not in already_in_group]
+        if to_assign:
+            student_group.user_set.add(*to_assign)
+            self.stdout.write(f'  → {len(to_assign)} mahasiswa di-assign ke group "Student"')
+
         self.stdout.write(f'  → {len(students)} mahasiswa tersedia')
         return students
 
@@ -345,6 +410,10 @@ class Command(BaseCommand):
         self.stdout.write('')
         self.stdout.write(self.style.HTTP_INFO('-' * 55))
         self.stdout.write(self.style.HTTP_INFO('  Ringkasan Data'))
+        self.stdout.write(self.style.HTTP_INFO('-' * 55))
+        self.stdout.write(f'  Group Admin      : {Group.objects.filter(name="Admin").first().user_set.count() if Group.objects.filter(name="Admin").exists() else 0} user')
+        self.stdout.write(f'  Group Instructor : {Group.objects.filter(name="Instructor").first().user_set.count() if Group.objects.filter(name="Instructor").exists() else 0} user')
+        self.stdout.write(f'  Group Student    : {Group.objects.filter(name="Student").first().user_set.count() if Group.objects.filter(name="Student").exists() else 0} user')
         self.stdout.write(self.style.HTTP_INFO('-' * 55))
         self.stdout.write(
             f"  User pengajar   : {User.objects.filter(username__startswith='dosen').count()}"

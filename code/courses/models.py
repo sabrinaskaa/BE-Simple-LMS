@@ -1,5 +1,32 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.utils.text import slugify
+
+
+class Category(models.Model):
+    name = models.CharField("nama kategori", max_length=100, unique=True)
+    description = models.TextField("deskripsi", default="-")
+    slug = models.SlugField(
+        "slug",
+        max_length=120,
+        unique=True,
+        blank=True,
+        help_text="Diisi otomatis dari nama kategori jika dikosongkan.",
+    )
+
+    def save(self, *args, **kwargs):
+        # Auto-generate slug dari name jika belum diisi
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name = "Kategori"
+        verbose_name_plural = "Kategori"
+        ordering = ["name"]
 
 
 class Course(models.Model):
@@ -7,6 +34,14 @@ class Course(models.Model):
     description = models.TextField("deskripsi", default='-')
     price = models.IntegerField("harga", default=10000)
     image = models.ImageField("gambar", null=True, blank=True)
+    category = models.ForeignKey(
+        Category,
+        verbose_name="kategori",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="courses",
+    )
     teacher = models.ForeignKey(
         User,
         verbose_name="pengajar",

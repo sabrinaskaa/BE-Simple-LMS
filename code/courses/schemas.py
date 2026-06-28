@@ -55,6 +55,34 @@ class UserUpdateIn(Schema):
     last_name: Optional[str] = None
 
 
+# CATEGORY SCHEMAS
+
+class CategoryOut(Schema):
+    id: int
+    name: str
+    description: str
+    slug: str
+
+
+class CategoryIn(Schema):
+    name: str
+    description: str = "-"
+    slug: str = ""
+
+
+class CategoryUpdateIn(Schema):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    slug: Optional[str] = None
+
+
+class PaginatedCategoryOut(Schema):
+    total: int
+    page: int
+    page_size: int
+    data: List[CategoryOut]
+
+
 # COURSE SCHEMAS
 
 class TeacherOut(Schema):
@@ -70,6 +98,7 @@ class CourseIn(Schema):
     description: str = "-"
     price: int
     image: Optional[str] = ""
+    category_id: Optional[int] = None
 
 
 class CourseUpdateIn(Schema):
@@ -77,6 +106,7 @@ class CourseUpdateIn(Schema):
     description: Optional[str] = None
     price: Optional[int] = None
     image: Optional[str] = None
+    category_id: Optional[int] = None
 
 
 class CourseOut(Schema):
@@ -85,6 +115,7 @@ class CourseOut(Schema):
     description: str
     price: int
     image: Optional[str] = None
+    category: Optional[CategoryOut] = None
     teacher: TeacherOut
     created_at: datetime
     updated_at: datetime
@@ -123,6 +154,41 @@ class ProgressOut(Schema):
     content_name: str
     is_completed: bool
     completed_at: datetime
+
+
+# CONTENT / LESSON SCHEMAS
+
+class ContentIn(Schema):
+    name: str
+    description: str = "-"
+    video_url: Optional[str] = None
+    parent_id: Optional[int] = None
+
+
+class ContentUpdateIn(Schema):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    video_url: Optional[str] = None
+    parent_id: Optional[int] = None
+
+
+class ContentOut(Schema):
+    id: int
+    name: str
+    description: str
+    video_url: Optional[str] = None
+    file_attachment: Optional[str] = None
+    course_id: int
+    parent_id: Optional[int] = None
+
+
+class PaginatedContentOut(Schema):
+    total: int
+    page: int
+    page_size: int
+    data: List[ContentOut]
+
+
 # ASYNC / REPORT SCHEMAS
 
 class TaskOut(Schema):

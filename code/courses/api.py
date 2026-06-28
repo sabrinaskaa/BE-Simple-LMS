@@ -20,12 +20,18 @@ from .cache import (
     course_list_cache_key,
     invalidate_course_cache,
 )
-from .models import Course, CourseMember, CourseContent, LessonProgress
+from .models import Category, Course, CourseMember, CourseContent, LessonProgress
 from .mongo import get_activity_report, get_learning_report, log_activity, log_learning_activity
 from .permissions import require_admin, require_instructor, require_student, is_admin, user_roles
 from .rate_limit import rate_limit, rate_limit_login
 from .schemas import (
     AccessTokenOut,
+    CategoryIn,
+    CategoryOut,
+    CategoryUpdateIn,
+    ContentIn,
+    ContentOut,
+    ContentUpdateIn,
     CourseIn,
     CourseOut,
     CourseUpdateIn,
@@ -35,6 +41,8 @@ from .schemas import (
     FileUploadOut,
     LoginIn,
     MessageOut,
+    PaginatedCategoryOut,
+    PaginatedContentOut,
     PaginatedCourseOut,
     PaginatedEnrollmentOut,
     ProgressIn,
@@ -83,12 +91,14 @@ def serialize_user(user: User):
 
 
 def serialize_course(course: Course):
+    cat = course.category
     return {
         "id": course.id,
         "name": course.name,
         "description": course.description,
         "price": course.price,
         "image": course.image.url if course.image else None,
+        "category": serialize_category(cat) if cat else None,
         "teacher": {
             "id": course.teacher.id,
             "username": course.teacher.username,
@@ -109,6 +119,29 @@ def serialize_enrollment(member: CourseMember):
         "user_id": member.user_id.id,
         "username": member.user_id.username,
         "roles": member.roles,
+    }
+
+
+def serialize_content(content: CourseContent):
+    return {
+        "id": content.id,
+        "name": content.name,
+        "description": content.description,
+        "video_url": content.video_url,
+        "file_attachment": (
+            content.file_attachment.url if content.file_attachment else None
+        ),
+        "course_id": content.course_id_id,
+        "parent_id": content.parent_id_id,
+    }
+
+
+def serialize_category(category: Category):
+    return {
+        "id": category.id,
+        "name": category.name,
+        "description": category.description,
+        "slug": category.slug,
     }
 
 
@@ -255,7 +288,9 @@ def detail_course(request, course_id: int):
     if cached is not None:
         return cached
 
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = get_object_or_404(
+        Course.objects.select_related("teacher", "category"), id=course_id
+    )
     response = serialize_course(course)
     cache_set(cache_key, response, timeout=300)
     log_activity(getattr(request, 'user', None), "view_course_detail", {"course_id": course_id})
@@ -270,12 +305,17 @@ def create_course(request, data: CourseIn):
     if data.price < 0:
         raise HttpError(400, "Harga tidak boleh negatif")
 
+    category = None
+    if data.category_id is not None:
+        category = get_object_or_404(Category, id=data.category_id)
+
     course = Course.objects.create(
         name=data.name,
         description=data.description,
         price=data.price,
         image=data.image or "",
         teacher=request.user,
+        category=category,
     )
     invalidate_course_cache(course.id)
     log_activity(request.user, "create_course", {"course_id": course.id})
@@ -284,7 +324,9 @@ def create_course(request, data: CourseIn):
 
 @api.patch("/courses/{course_id}", auth=api_auth, response={200: CourseOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut}, tags=["Courses"])
 def update_course(request, course_id: int, data: CourseUpdateIn):
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = get_object_or_404(
+        Course.objects.select_related("teacher", "category"), id=course_id
+    )
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh mengedit course")
 
@@ -298,6 +340,8 @@ def update_course(request, course_id: int, data: CourseUpdateIn):
         course.price = data.price
     if data.image is not None:
         course.image = data.image
+    if data.category_id is not None:
+        course.category = get_object_or_404(Category, id=data.category_id)
 
     course.save()
     invalidate_course_cache(course.id)
@@ -315,6 +359,282 @@ def delete_course(request, course_id: int):
     invalidate_course_cache(course_id)
     log_activity(request.user, "delete_course", {"course_id": course_id})
     return {"message": "Course berhasil dihapus"}
+
+
+# 3.2 CATEGORY ENDPOINTS
+
+@api.get(
+    "/categories",
+    response={200: PaginatedCategoryOut},
+    tags=["Categories"],
+    summary="List semua kategori",
+)
+def list_categories(request, page: int = 1, page_size: int = 20):
+    """Publik — siapa saja bisa melihat daftar kategori."""
+    page = max(page, 1)
+    page_size = max(min(page_size, 100), 1)
+    qs = Category.objects.all()
+    total = qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "data": [serialize_category(c) for c in qs[start:end]],
+    }
+
+
+@api.get(
+    "/categories/{category_id}",
+    response={200: CategoryOut, 404: ErrorOut},
+    tags=["Categories"],
+    summary="Detail satu kategori beserta jumlah course di dalamnya",
+)
+def detail_category(request, category_id: int):
+    category = get_object_or_404(Category, id=category_id)
+    return serialize_category(category)
+
+
+@api.post(
+    "/categories",
+    auth=api_auth,
+    response={201: CategoryOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut},
+    tags=["Categories"],
+    summary="Buat kategori baru (Admin only)",
+)
+def create_category(request, data: CategoryIn):
+    if not is_admin(request.user):
+        raise HttpError(403, "Hanya admin yang boleh membuat kategori")
+
+    if Category.objects.filter(name=data.name).exists():
+        raise HttpError(400, "Nama kategori sudah digunakan")
+
+    category = Category(
+        name=data.name,
+        description=data.description,
+        slug=data.slug or "",
+    )
+    category.save()  # save() akan auto-generate slug jika kosong
+    log_activity(request.user, "create_category", {"category_id": category.id})
+    return 201, serialize_category(category)
+
+
+@api.patch(
+    "/categories/{category_id}",
+    auth=api_auth,
+    response={200: CategoryOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Categories"],
+    summary="Update kategori (Admin only)",
+)
+def update_category(request, category_id: int, data: CategoryUpdateIn):
+    if not is_admin(request.user):
+        raise HttpError(403, "Hanya admin yang boleh mengubah kategori")
+
+    category = get_object_or_404(Category, id=category_id)
+
+    if data.name is not None:
+        if Category.objects.exclude(id=category_id).filter(name=data.name).exists():
+            raise HttpError(400, "Nama kategori sudah digunakan")
+        category.name = data.name
+        # Reset slug agar di-generate ulang dari nama baru
+        category.slug = ""
+    if data.description is not None:
+        category.description = data.description
+    if data.slug is not None and data.slug != "":
+        category.slug = data.slug
+
+    category.save()
+    log_activity(request.user, "update_category", {"category_id": category.id})
+    return serialize_category(category)
+
+
+@api.delete(
+    "/categories/{category_id}",
+    auth=api_auth,
+    response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Categories"],
+    summary="Hapus kategori (Admin only)",
+)
+def delete_category(request, category_id: int):
+    if not is_admin(request.user):
+        raise HttpError(403, "Hanya admin yang boleh menghapus kategori")
+
+    category = get_object_or_404(Category, id=category_id)
+    name = category.name
+    category.delete()  # Course yang punya category ini → category jadi NULL (SET_NULL)
+    log_activity(request.user, "delete_category", {"category_id": category_id, "name": name})
+    return {"message": f"Kategori '{name}' berhasil dihapus"}
+
+
+@api.get(
+    "/categories/{category_id}/courses",
+    response={200: PaginatedCourseOut, 404: ErrorOut},
+    tags=["Categories"],
+    summary="List semua course dalam suatu kategori",
+)
+def list_courses_by_category(request, category_id: int, page: int = 1, page_size: int = 10):
+    category = get_object_or_404(Category, id=category_id)
+    page = max(page, 1)
+    page_size = max(min(page_size, 100), 1)
+    qs = Course.objects.select_related("teacher", "category").filter(category=category)
+    total = qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "data": [serialize_course(c) for c in qs[start:end]],
+    }
+
+
+@api.get(
+    "/courses/{course_id}/contents",
+    response={200: PaginatedContentOut, 404: ErrorOut},
+    tags=["Contents"],
+    summary="List semua lesson dalam sebuah course",
+)
+def list_contents(request, course_id: int, page: int = 1, page_size: int = 10):
+    course = get_object_or_404(Course, id=course_id)
+    page = max(page, 1)
+    page_size = max(min(page_size, 100), 1)
+
+    qs = (
+        CourseContent.objects
+        .filter(course_id=course)
+        .order_by("id")
+    )
+    total = qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+
+    log_activity(
+        getattr(request, "user", None),
+        "list_contents",
+        {"course_id": course_id},
+    )
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "data": [serialize_content(c) for c in qs[start:end]],
+    }
+
+
+@api.get(
+    "/courses/{course_id}/contents/{content_id}",
+    response={200: ContentOut, 404: ErrorOut},
+    tags=["Contents"],
+    summary="Detail satu lesson",
+)
+def detail_content(request, course_id: int, content_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    content = get_object_or_404(CourseContent, id=content_id, course_id=course)
+    log_activity(
+        getattr(request, "user", None),
+        "view_content_detail",
+        {"course_id": course_id, "content_id": content_id},
+    )
+    return serialize_content(content)
+
+
+@api.post(
+    "/courses/{course_id}/contents",
+    auth=api_auth,
+    response={201: ContentOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Contents"],
+    summary="Tambah lesson baru ke course (Instructor/Admin)",
+)
+def create_content(request, course_id: int, data: ContentIn):
+    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh menambahkan konten")
+
+    # Validasi parent_id jika diberikan (untuk konten bersarang)
+    parent = None
+    if data.parent_id is not None:
+        if data.parent_id == 0:
+            raise HttpError(400, "parent_id tidak valid")
+        parent = get_object_or_404(
+            CourseContent, id=data.parent_id, course_id=course
+        )
+
+    content = CourseContent.objects.create(
+        name=data.name,
+        description=data.description,
+        video_url=data.video_url,
+        course_id=course,
+        parent_id=parent,
+    )
+    invalidate_course_cache(course.id)
+    log_activity(
+        request.user,
+        "create_content",
+        {"course_id": course.id, "content_id": content.id},
+    )
+    return 201, serialize_content(content)
+
+
+@api.patch(
+    "/courses/{course_id}/contents/{content_id}",
+    auth=api_auth,
+    response={200: ContentOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Contents"],
+    summary="Update lesson (Instructor/Admin)",
+)
+def update_content(request, course_id: int, content_id: int, data: ContentUpdateIn):
+    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh mengedit konten")
+
+    content = get_object_or_404(CourseContent, id=content_id, course_id=course)
+
+    if data.name is not None:
+        content.name = data.name
+    if data.description is not None:
+        content.description = data.description
+    if data.video_url is not None:
+        content.video_url = data.video_url
+    if data.parent_id is not None:
+        if data.parent_id == content_id:
+            raise HttpError(400, "Konten tidak bisa menjadi parent dari dirinya sendiri")
+        parent = get_object_or_404(
+            CourseContent, id=data.parent_id, course_id=course
+        )
+        content.parent_id = parent
+
+    content.save()
+    invalidate_course_cache(course.id)
+    log_activity(
+        request.user,
+        "update_content",
+        {"course_id": course.id, "content_id": content.id},
+    )
+    return serialize_content(content)
+
+
+@api.delete(
+    "/courses/{course_id}/contents/{content_id}",
+    auth=api_auth,
+    response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Contents"],
+    summary="Hapus lesson (Instructor/Admin)",
+)
+def delete_content(request, course_id: int, content_id: int):
+    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh menghapus konten")
+
+    content = get_object_or_404(CourseContent, id=content_id, course_id=course)
+    content.delete()
+    invalidate_course_cache(course.id)
+    log_activity(
+        request.user,
+        "delete_content",
+        {"course_id": course.id, "content_id": content_id},
+    )
+    return {"message": "Konten berhasil dihapus"}
 
 
 # 4. ENROLLMENTS ENDPOINTS + CELERY TASKS + MONGODB LOGS

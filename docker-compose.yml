@@ -1,3 +1,11 @@
+# =============================================================================
+# Simple LMS - Docker Compose
+# =============================================================================
+# Semua nilai sensitif dibaca dari file .env di direktori yang sama.
+# Salin .env.example → .env lalu isi nilainya sebelum menjalankan:
+#   docker compose up -d
+# =============================================================================
+
 services:
   app:
     image: kaqfa/be_simple_lms-django
@@ -7,19 +15,8 @@ services:
       - ./code:/code
     ports:
       - "8000:8000"
-    environment:
-      - DEBUG=True
-      - DJANGO_SECRET_KEY=django-dev-secret-change-me-in-production-a1b2c3d4e5
-      - POSTGRES_DB=lms_db
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_HOST=database
-      - POSTGRES_PORT=5432
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - MONGODB_URI=mongodb://mongodb:27017/
-      - MONGODB_NAME=lms_logs
+    env_file:
+      - .env
     depends_on:
       - database
       - redis
@@ -30,9 +27,9 @@ services:
     image: postgres:16
     container_name: lms-db
     environment:
-      - POSTGRES_DB=lms_db
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - pg_data:/var/lib/postgresql/data
     ports:
@@ -68,19 +65,8 @@ services:
     command: sh -c "pip install -r requirements.txt && celery -A lms worker -l info"
     volumes:
       - ./code:/code
-    environment:
-      - DEBUG=True
-      - DJANGO_SECRET_KEY=django-dev-secret-change-me-in-production-a1b2c3d4e5
-      - POSTGRES_DB=lms_db
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_HOST=database
-      - POSTGRES_PORT=5432
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - MONGODB_URI=mongodb://mongodb:27017/
-      - MONGODB_NAME=lms_logs
+    env_file:
+      - .env
     depends_on:
       - app
       - redis
@@ -93,19 +79,8 @@ services:
     command: sh -c "pip install -r requirements.txt && celery -A lms beat -l info"
     volumes:
       - ./code:/code
-    environment:
-      - DEBUG=True
-      - DJANGO_SECRET_KEY=django-dev-secret-change-me-in-production-a1b2c3d4e5
-      - POSTGRES_DB=lms_db
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_HOST=database
-      - POSTGRES_PORT=5432
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - MONGODB_URI=mongodb://mongodb:27017/
-      - MONGODB_NAME=lms_logs
+    env_file:
+      - .env
     depends_on:
       - app
       - redis
@@ -121,8 +96,8 @@ services:
     ports:
       - "5555:5555"
     environment:
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
     depends_on:
       - celery-worker
       - rabbitmq

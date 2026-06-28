@@ -1,11 +1,18 @@
 from django.contrib import admin
-from .models import Course, CourseMember, CourseContent, Comment
+from .models import Category, Course, CourseMember, CourseContent, Comment
+
+
+@admin.register(Category)
+class CategoryAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'description')
+    search_fields = ('name', 'slug')
+    prepopulated_fields = {'slug': ('name',)}
 
 
 @admin.register(Course)
 class CourseAdmin(admin.ModelAdmin):
-    list_display = ('name', 'teacher', 'price', 'created_at')
-    list_filter = ('teacher', 'created_at')
+    list_display = ('name', 'category', 'teacher', 'price', 'created_at')
+    list_filter = ('category', 'teacher', 'created_at')
     search_fields = ('name', 'description')
     ordering = ('-created_at',)
 
