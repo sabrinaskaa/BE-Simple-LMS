@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils.text import slugify
+from django.core.validators import MinValueValidator, MaxValueValidator
 
 
 class Category(models.Model):
@@ -15,7 +16,6 @@ class Category(models.Model):
     )
 
     def save(self, *args, **kwargs):
-        # Auto-generate slug dari name jika belum diisi
         if not self.slug:
             self.slug = slugify(self.name)
         super().save(*args, **kwargs)
@@ -29,11 +29,43 @@ class Category(models.Model):
         ordering = ["name"]
 
 
+LEVEL_OPTIONS = [
+    ('beginner', 'Pemula'),
+    ('intermediate', 'Menengah'),
+    ('advanced', 'Lanjutan'),
+]
+
+STATUS_OPTIONS = [
+    ('draft', 'Draft'),
+    ('published', 'Dipublikasikan'),
+    ('archived', 'Diarsipkan'),
+]
+
+
 class Course(models.Model):
     name = models.CharField("nama matkul", max_length=100)
     description = models.TextField("deskripsi", default='-')
     price = models.IntegerField("harga", default=10000)
     image = models.ImageField("gambar", null=True, blank=True)
+    level = models.CharField(
+        "level",
+        max_length=12,
+        choices=LEVEL_OPTIONS,
+        default='beginner',
+    )
+    status = models.CharField(
+        "status",
+        max_length=10,
+        choices=STATUS_OPTIONS,
+        default='published',
+    )
+    rating_avg = models.DecimalField(
+        "rata-rata rating",
+        max_digits=3,
+        decimal_places=2,
+        default=0.00,
+    )
+    total_reviews = models.IntegerField("total review", default=0)
     category = models.ForeignKey(
         Category,
         verbose_name="kategori",
@@ -59,6 +91,9 @@ class Course(models.Model):
         indexes = [
             models.Index(fields=['price'], name='idx_course_price'),
             models.Index(fields=['teacher', 'price'], name='idx_course_teacher_price'),
+            models.Index(fields=['status'], name='idx_course_status'),
+            models.Index(fields=['level'], name='idx_course_level'),
+            models.Index(fields=['rating_avg'], name='idx_course_rating'),
         ]
 
 
@@ -94,6 +129,26 @@ class CourseMember(models.Model):
         verbose_name_plural = "Anggota Kelas"
 
 
+class CourseSection(models.Model):
+    course = models.ForeignKey(
+        Course,
+        verbose_name="matkul",
+        on_delete=models.CASCADE,
+        related_name="sections",
+    )
+    title = models.CharField("judul section", max_length=200)
+    order = models.IntegerField("urutan", default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.course.name} — {self.title}"
+
+    class Meta:
+        verbose_name = "Section Kelas"
+        verbose_name_plural = "Section Kelas"
+        ordering = ["course", "order"]
+
+
 class CourseContent(models.Model):
     name = models.CharField("judul konten", max_length=200)
     description = models.TextField("deskripsi", default='-')
@@ -116,6 +171,17 @@ class CourseContent(models.Model):
         null=True,
         blank=True
     )
+    # Fitur 3: Section & ordering
+    section = models.ForeignKey(
+        CourseSection,
+        verbose_name="section",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="contents",
+    )
+    order = models.IntegerField("urutan dalam section", default=0)
+    duration_minutes = models.IntegerField("estimasi durasi (menit)", null=True, blank=True)
 
     def __str__(self):
         return self.name
@@ -123,6 +189,7 @@ class CourseContent(models.Model):
     class Meta:
         verbose_name = "Konten Kelas"
         verbose_name_plural = "Konten Kelas"
+        ordering = ["course_id", "order"]
 
 
 class Comment(models.Model):
@@ -145,6 +212,7 @@ class Comment(models.Model):
         verbose_name = "Komentar"
         verbose_name_plural = "Komentar"
 
+
 class LessonProgress(models.Model):
     member = models.ForeignKey(
         CourseMember,
@@ -166,3 +234,57 @@ class LessonProgress(models.Model):
         verbose_name = "Progress Lesson"
         verbose_name_plural = "Progress Lesson"
         unique_together = ("member", "content")
+
+
+class CourseReview(models.Model):
+    course = models.ForeignKey(
+        Course,
+        verbose_name="matkul",
+        on_delete=models.CASCADE,
+        related_name="reviews",
+    )
+    user = models.ForeignKey(
+        User,
+        verbose_name="pengguna",
+        on_delete=models.CASCADE,
+        related_name="course_reviews",
+    )
+    rating = models.IntegerField(
+        "rating",
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+    )
+    review = models.TextField("ulasan", blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.username} → {self.course.name} ({self.rating}★)"
+
+    class Meta:
+        verbose_name = "Review Course"
+        verbose_name_plural = "Review Course"
+        unique_together = ("course", "user")
+
+
+class Wishlist(models.Model):
+    user = models.ForeignKey(
+        User,
+        verbose_name="pengguna",
+        on_delete=models.CASCADE,
+        related_name="wishlist",
+    )
+    course = models.ForeignKey(
+        Course,
+        verbose_name="matkul",
+        on_delete=models.CASCADE,
+        related_name="wishlisted_by",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.username} ♥ {self.course.name}"
+
+    class Meta:
+        verbose_name = "Wishlist"
+        verbose_name_plural = "Wishlist"
+        unique_together = ("user", "course")

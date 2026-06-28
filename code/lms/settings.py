@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     # "silk",       # Django Silk - query profiling (Modul 05)
     "courses",    # Aplikasi Simple LMS kita
+    "analytics",  # Analytics MongoDB - activity & request logs (Modul 11)
 ]
 
 
@@ -49,6 +50,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "analytics.middleware.ActivityLoggingMiddleware",  # Auto-log setiap request ke MongoDB
 ]
 
 ROOT_URLCONF = "lms.urls"
@@ -179,7 +181,8 @@ X_FRAME_OPTIONS = "DENY"
 # =============================================================================
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://mongodb:27017/")
-MONGODB_NAME = os.environ.get("MONGODB_NAME", "lms_logs")
+MONGODB_NAME = os.environ.get("MONGODB_NAME", "lms_logs")              # database untuk system/error logs
+MONGODB_ANALYTICS_DB = os.environ.get("MONGODB_ANALYTICS_DB", "lms_analytics")  # database untuk analytics
 
 CACHES = {
     "default": {
@@ -191,8 +194,8 @@ CACHES = {
     }
 }
 
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "amqp://guest:guest@rabbitmq:5672//")
-CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "amqp://admin:password123@rabbitmq:5672//")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/2")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -200,3 +203,30 @@ CELERY_TIMEZONE = TIME_ZONE
 
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 DEFAULT_FROM_EMAIL = "noreply@simple-lms.local"
+
+
+# =============================================================================
+# Celery Beat Schedule — Periodic Tasks
+# =============================================================================
+from celery.schedules import crontab  # noqa: E402
+
+CELERY_BEAT_SCHEDULE = {
+    # Statistik harian LMS dijalankan setiap hari pukul 00:00 WIB
+    'daily-course-stats': {
+        'task': 'courses.tasks.generate_daily_stats',
+        'schedule': crontab(hour=0, minute=0),
+        'args': (),
+    },
+    # Hapus log lama (>30 hari) setiap hari pukul 02:00 WIB
+    'cleanup-old-logs': {
+        'task': 'courses.tasks.cleanup_old_logs',
+        'schedule': crontab(hour=2, minute=0),
+        'args': (),
+    },
+    # Update statistik course setiap jam (task existing)
+    'update-course-statistics-every-hour': {
+        'task': 'courses.tasks.update_course_statistics',
+        'schedule': crontab(minute=0),
+        'args': (),
+    },
+}

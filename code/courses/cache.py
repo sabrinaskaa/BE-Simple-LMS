@@ -29,8 +29,23 @@ def cache_delete_pattern(pattern: str) -> int:
     return client.delete(*keys)
 
 
-def course_list_cache_key(search=None, min_price=None, max_price=None, ordering='-created_at', page=1, page_size=10) -> str:
-    return f"course:list:search={search}:min={min_price}:max={max_price}:ordering={ordering}:page={page}:size={page_size}"
+def course_list_cache_key(
+    search=None,
+    min_price=None,
+    max_price=None,
+    ordering='-created_at',
+    page=1,
+    page_size=10,
+    category_id=None,
+    level=None,
+    status=None,
+    instructor_id=None,
+) -> str:
+    return (
+        f"course:list:search={search}:min={min_price}:max={max_price}"
+        f":cat={category_id}:level={level}:status={status}"
+        f":instructor={instructor_id}:ordering={ordering}:page={page}:size={page_size}"
+    )
 
 
 def course_detail_cache_key(course_id: int) -> str:
@@ -41,3 +56,11 @@ def invalidate_course_cache(course_id: int | None = None) -> None:
     cache_delete_pattern('course:list:*')
     if course_id is not None:
         get_redis_client().delete(course_detail_cache_key(course_id))
+
+
+def dashboard_cache_key(user_id: int) -> str:
+    return f"dashboard:student:{user_id}"
+
+
+def invalidate_dashboard_cache(user_id: int) -> None:
+    get_redis_client().delete(dashboard_cache_key(user_id))

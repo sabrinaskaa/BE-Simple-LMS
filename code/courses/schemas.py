@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional, List
 
 from ninja import Schema
@@ -99,6 +100,8 @@ class CourseIn(Schema):
     price: int
     image: Optional[str] = ""
     category_id: Optional[int] = None
+    level: str = "beginner"
+    status: str = "published"
 
 
 class CourseUpdateIn(Schema):
@@ -107,6 +110,8 @@ class CourseUpdateIn(Schema):
     price: Optional[int] = None
     image: Optional[str] = None
     category_id: Optional[int] = None
+    level: Optional[str] = None
+    status: Optional[str] = None
 
 
 class CourseOut(Schema):
@@ -114,9 +119,13 @@ class CourseOut(Schema):
     name: str
     description: str
     price: int
+    level: str
+    status: str
     image: Optional[str] = None
     category: Optional[CategoryOut] = None
     teacher: TeacherOut
+    rating_avg: Decimal
+    total_reviews: int
     created_at: datetime
     updated_at: datetime
 
@@ -163,6 +172,9 @@ class ContentIn(Schema):
     description: str = "-"
     video_url: Optional[str] = None
     parent_id: Optional[int] = None
+    section_id: Optional[int] = None
+    order: int = 0
+    duration_minutes: Optional[int] = None
 
 
 class ContentUpdateIn(Schema):
@@ -170,6 +182,9 @@ class ContentUpdateIn(Schema):
     description: Optional[str] = None
     video_url: Optional[str] = None
     parent_id: Optional[int] = None
+    section_id: Optional[int] = None
+    order: Optional[int] = None
+    duration_minutes: Optional[int] = None
 
 
 class ContentOut(Schema):
@@ -180,6 +195,9 @@ class ContentOut(Schema):
     file_attachment: Optional[str] = None
     course_id: int
     parent_id: Optional[int] = None
+    section_id: Optional[int] = None
+    order: int
+    duration_minutes: Optional[int] = None
 
 
 class PaginatedContentOut(Schema):
@@ -187,6 +205,134 @@ class PaginatedContentOut(Schema):
     page: int
     page_size: int
     data: List[ContentOut]
+
+
+# SECTION SCHEMAS
+
+class SectionIn(Schema):
+    title: str
+    order: int = 0
+
+
+class SectionUpdateIn(Schema):
+    title: Optional[str] = None
+    order: Optional[int] = None
+
+
+class SectionOut(Schema):
+    id: int
+    course_id: int
+    title: str
+    order: int
+    created_at: datetime
+
+
+class ContentInSectionOut(Schema):
+    id: int
+    name: str
+    description: str
+    video_url: Optional[str] = None
+    order: int
+    duration_minutes: Optional[int] = None
+
+
+class SectionWithLessonsOut(Schema):
+    id: int
+    course_id: int
+    title: str
+    order: int
+    total_lessons: int
+    lessons: List[ContentInSectionOut]
+
+
+# REVIEW SCHEMAS
+
+class ReviewIn(Schema):
+    rating: int
+    review: str = ""
+
+
+class ReviewOut(Schema):
+    id: int
+    course_id: int
+    user_id: int
+    username: str
+    rating: int
+    review: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReviewListOut(Schema):
+    total: int
+    rating_avg: Decimal
+    data: List[ReviewOut]
+
+
+# WISHLIST SCHEMAS
+
+class WishlistIn(Schema):
+    course_id: int
+
+
+class WishlistOut(Schema):
+    id: int
+    course_id: int
+    course_name: str
+    rating_avg: Decimal
+    created_at: datetime
+
+
+class PaginatedWishlistOut(Schema):
+    total: int
+    page: int
+    page_size: int
+    data: List[WishlistOut]
+
+
+# PROGRESS DETAIL SCHEMAS
+
+class SectionProgressOut(Schema):
+    section_id: Optional[int] = None
+    section_title: str
+    total_lessons: int
+    completed_lessons: int
+
+
+class EnrollmentProgressDetailOut(Schema):
+    total_lessons: int
+    completed_lessons: int
+    progress_percent: float
+    sections: List[SectionProgressOut]
+
+
+# DASHBOARD SCHEMAS
+
+class DashboardCourseOut(Schema):
+    course_id: int
+    course_name: str
+    progress_percent: float
+    total_lessons: int
+    completed_lessons: int
+    instructor_name: str
+
+
+class RecommendedCourseOut(Schema):
+    id: int
+    name: str
+    rating_avg: Decimal
+    total_reviews: int
+    price: int
+    instructor_name: str
+
+
+class StudentDashboardOut(Schema):
+    active_courses: List[DashboardCourseOut]
+    completed_courses: List[DashboardCourseOut]
+    total_enrolled: int
+    total_completed: int
+    wishlist_count: int
+    recommended_courses: List[RecommendedCourseOut]
 
 
 # ASYNC / REPORT SCHEMAS

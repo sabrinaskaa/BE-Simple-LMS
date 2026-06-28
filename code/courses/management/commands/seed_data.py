@@ -2,7 +2,11 @@ import random
 from django.contrib.auth.hashers import make_password
 from django.core.management.base import BaseCommand
 from django.contrib.auth.models import Group, User
-from courses.models import Course, CourseMember, CourseContent, Comment
+from django.db.models import Avg, Count
+from courses.models import (
+    Category, Course, CourseMember, CourseContent, CourseReview,
+    CourseSection, Comment, LessonProgress, Wishlist,
+)
 
 
 # =============================================================================
@@ -105,27 +109,64 @@ COMMENTS = [
     'Ada yang bisa bantu explain perbedaannya dengan konsep sebelumnya?',
 ]
 
+REVIEW_TEXTS = [
+    'Materi sangat lengkap dan mudah dipahami. Sangat direkomendasikan!',
+    'Instruktur menjelaskan dengan sangat jelas dan sabar.',
+    'Course yang bagus untuk pemula, step by step sangat terstruktur.',
+    'Kurang update dengan teknologi terbaru, tapi dasarnya bagus.',
+    'Sangat membantu karir saya, langsung bisa dipraktikkan.',
+    'Penjelasan terlalu cepat di beberapa bagian.',
+    'Konten berkualitas tinggi, worth every penny!',
+    'Latihan soal sangat membantu pemahaman materi.',
+    'Perlu lebih banyak contoh kasus nyata.',
+    'Instruktur sangat responsif menjawab pertanyaan.',
+    'Struktur kursus yang baik, dari dasar hingga lanjutan.',
+    'Banyak ilmu baru yang saya dapatkan dari sini.',
+    'Rekomendasikan untuk siapa saja yang ingin belajar dari nol.',
+    'Video berkualitas baik dan audio jelas.',
+    'Beberapa materi bisa lebih diperdalam.',
+]
+
+SECTION_TITLES = [
+    'Pendahuluan',
+    'Materi Dasar',
+    'Konsep Inti',
+    'Praktik Langsung',
+    'Studi Kasus',
+    'Proyek Akhir',
+    'Evaluasi dan Kuis',
+    'Materi Lanjutan',
+    'Tips dan Trik',
+    'Penutup dan Ringkasan',
+]
+
 PRICES = [50000, 75000, 100000, 125000, 150000, 200000, 250000]
+LEVELS = ['beginner', 'intermediate', 'advanced']
+STATUSES = ['draft', 'published', 'published', 'published', 'archived']  # lebih banyak published
 
 
 class Command(BaseCommand):
-    help = 'Seed database dengan data dummy untuk Lab 05 Optimasi Database'
+    help = 'Seed database dengan data dummy untuk LMS'
 
     def handle(self, *args, **options):
         # Seed random agar hasil konsisten setiap kali dijalankan
         random.seed(42)
 
         self.stdout.write(self.style.HTTP_INFO('=' * 55))
-        self.stdout.write(self.style.HTTP_INFO('  Seeding Data - Lab 05: Optimasi Database'))
+        self.stdout.write(self.style.HTTP_INFO('  Seeding Data - Simple LMS'))
         self.stdout.write(self.style.HTTP_INFO('=' * 55))
 
         groups = self._seed_groups()
         teachers = self._seed_teachers(groups['instructor'])
         students = self._seed_students(groups['student'])
+        self._seed_categories()
         courses = self._seed_courses(teachers)
         members = self._seed_members(courses, students)
         contents = self._seed_contents(courses)
+        self._seed_sections(courses, contents)
         self._seed_comments(contents, members)
+        self._seed_reviews(courses, members, students)
+        self._seed_wishlist(courses, students)
 
         self._print_summary()
 
@@ -143,13 +184,12 @@ class Command(BaseCommand):
     # Step 0: Buat Django Groups untuk RBAC (Admin, Instructor, Student)
     # -------------------------------------------------------------------------
     def _seed_groups(self):
-        self.stdout.write('\n[0/6] Membuat Django Groups (Admin, Instructor, Student)...')
+        self.stdout.write('\n[0/9] Membuat Django Groups (Admin, Instructor, Student)...')
 
         admin_group, admin_created = Group.objects.get_or_create(name='Admin')
         instructor_group, instructor_created = Group.objects.get_or_create(name='Instructor')
         student_group, student_created = Group.objects.get_or_create(name='Student')
 
-        # Buat superuser 'admin' sebagai akun demo Admin jika belum ada
         if not User.objects.filter(username='admin').exists():
             admin_user = User.objects.create_superuser(
                 username='admin',
@@ -180,7 +220,7 @@ class Command(BaseCommand):
     # Step 1: Buat 20 User pengajar
     # -------------------------------------------------------------------------
     def _seed_teachers(self, instructor_group):
-        self.stdout.write('\n[1/6] Membuat pengajar (dosen01 - dosen20)...')
+        self.stdout.write('\n[1/9] Membuat pengajar (dosen01 - dosen20)...')
 
         existing = set(
             User.objects.filter(username__startswith='dosen')
@@ -199,8 +239,6 @@ class Command(BaseCommand):
                     last_name=lname,
                     email=f'{username}@univ.ac.id',
                     is_staff=False,
-                    # make_password() diperlukan karena bulk_create tidak memanggil
-                    # set_password() → password harus di-hash sebelum bulk_create
                     password=make_password('password123'),
                 ))
 
@@ -209,8 +247,6 @@ class Command(BaseCommand):
 
         teachers = list(User.objects.filter(username__startswith='dosen'))
 
-        # Assign group Instructor ke semua dosen yang belum punya group tersebut
-        # Gunakan set() untuk efisiensi — hindari query N+1 via through table
         already_in_group = set(
             instructor_group.user_set.filter(username__startswith='dosen')
             .values_list('id', flat=True)
@@ -227,7 +263,7 @@ class Command(BaseCommand):
     # Step 2: Buat 80 User mahasiswa
     # -------------------------------------------------------------------------
     def _seed_students(self, student_group):
-        self.stdout.write('\n[2/6] Membuat mahasiswa (mhs001 - mhs080)...')
+        self.stdout.write('\n[2/9] Membuat mahasiswa (mhs001 - mhs080)...')
 
         existing = set(
             User.objects.filter(username__startswith='mhs')
@@ -251,7 +287,6 @@ class Command(BaseCommand):
 
         students = list(User.objects.filter(username__startswith='mhs'))
 
-        # Assign group Student ke semua mahasiswa yang belum punya group tersebut
         already_in_group = set(
             student_group.user_set.filter(username__startswith='mhs')
             .values_list('id', flat=True)
@@ -265,17 +300,33 @@ class Command(BaseCommand):
         return students
 
     # -------------------------------------------------------------------------
+    # Step 2.5: Buat Categories
+    # -------------------------------------------------------------------------
+    def _seed_categories(self):
+        self.stdout.write('\n[2.5/9] Membuat kategori course...')
+        CATEGORIES = [
+            ('Pemrograman', 'Kursus tentang bahasa pemrograman dan pengembangan software'),
+            ('Basis Data', 'Kursus manajemen dan desain database'),
+            ('Jaringan & Keamanan', 'Kursus jaringan komputer dan keamanan siber'),
+            ('Data Science', 'Kursus analisis data, machine learning, dan AI'),
+            ('DevOps & Cloud', 'Kursus deployment, containerisasi, dan cloud computing'),
+        ]
+        for name, desc in CATEGORIES:
+            Category.objects.get_or_create(name=name, defaults={'description': desc})
+        self.stdout.write(f'  → {Category.objects.count()} kategori tersedia')
+
+    # -------------------------------------------------------------------------
     # Step 3: Buat 100 Course
     # -------------------------------------------------------------------------
     def _seed_courses(self, teachers):
-        self.stdout.write('\n[3/6] Membuat 100 mata kuliah...')
+        self.stdout.write('\n[3/9] Membuat 100 mata kuliah...')
 
+        categories = list(Category.objects.all())
         existing_count = Course.objects.count()
         to_create = []
 
         for i in range(existing_count, 100):
             subject = SUBJECTS[i % len(SUBJECTS)]
-            # Jika subject sudah dipakai, tambahkan kelas (A, B, C, ...)
             kelas_idx = i // len(SUBJECTS)
             name = subject if kelas_idx == 0 else f'{subject} - Kelas {chr(65 + kelas_idx - 1)}'
             to_create.append(Course(
@@ -287,6 +338,9 @@ class Command(BaseCommand):
                 ),
                 price=random.choice(PRICES),
                 teacher=random.choice(teachers),
+                level=random.choice(LEVELS),
+                status=random.choice(STATUSES),
+                category=random.choice(categories) if categories else None,
             ))
 
         if to_create:
@@ -300,10 +354,9 @@ class Command(BaseCommand):
     # Step 4: Buat 500 CourseMember
     # -------------------------------------------------------------------------
     def _seed_members(self, courses, students):
-        self.stdout.write('\n[4/6] Membuat 500 anggota kelas...')
+        self.stdout.write('\n[4/9] Membuat 500 anggota kelas...')
 
         existing_count = CourseMember.objects.count()
-        # Buat set pasangan (course_id, user_id) yang sudah ada untuk cek duplikat
         existing_pairs = set(
             CourseMember.objects.values_list('course_id_id', 'user_id_id')
         )
@@ -320,7 +373,7 @@ class Command(BaseCommand):
 
             if pair not in existing_pairs:
                 existing_pairs.add(pair)
-                role = 'ast' if random.random() < 0.1 else 'std'  # 10% asisten
+                role = 'ast' if random.random() < 0.1 else 'std'
                 to_create.append(CourseMember(
                     course_id=course,
                     user_id=student,
@@ -338,7 +391,7 @@ class Command(BaseCommand):
     # Step 5: Buat 300 CourseContent
     # -------------------------------------------------------------------------
     def _seed_contents(self, courses):
-        self.stdout.write('\n[5/6] Membuat 300 konten kelas...')
+        self.stdout.write('\n[5/9] Membuat 300 konten kelas...')
 
         existing_count = CourseContent.objects.count()
         to_create = []
@@ -355,7 +408,9 @@ class Command(BaseCommand):
                     f'Pelajari konsep ini dengan seksama sebelum mengerjakan latihan.'
                 ),
                 course_id=course,
-                parent_id=None,  # Top-level content (tanpa induk)
+                parent_id=None,
+                order=i % 10,
+                duration_minutes=random.choice([15, 20, 30, 45, 60, None]),
             ))
 
         if to_create:
@@ -366,10 +421,57 @@ class Command(BaseCommand):
         return contents
 
     # -------------------------------------------------------------------------
-    # Step 6: Buat 1000+ Comment
+    # Step 6: Buat Sections dan assign contents ke sections
+    # -------------------------------------------------------------------------
+    def _seed_sections(self, courses, contents):
+        self.stdout.write('\n[6/9] Membuat sections dan mengorganisir konten...')
+
+        if CourseSection.objects.count() > 0:
+            self.stdout.write(f'  → {CourseSection.objects.count()} sections sudah ada (skip)')
+            return
+
+        sections_to_create = []
+        # Buat 2-3 sections untuk setiap course (dari 30 course pertama saja agar tidak terlalu banyak)
+        sample_courses = courses[:30]
+        for course in sample_courses:
+            num_sections = random.randint(2, 4)
+            for j in range(num_sections):
+                sections_to_create.append(CourseSection(
+                    course=course,
+                    title=SECTION_TITLES[j % len(SECTION_TITLES)],
+                    order=j,
+                ))
+
+        CourseSection.objects.bulk_create(sections_to_create, batch_size=500)
+
+        # Assign sebagian contents ke sections secara random
+        all_sections = list(CourseSection.objects.all())
+        if not all_sections:
+            return
+
+        # Ambil contents yang belum punya section
+        unassigned = list(CourseContent.objects.filter(section__isnull=True)[:150])
+        to_update = []
+        for i, content in enumerate(unassigned):
+            section = all_sections[i % len(all_sections)]
+            # Pastikan section dari course yang sama
+            course_sections = [s for s in all_sections if s.course_id == content.course_id_id]
+            if course_sections:
+                content.section = random.choice(course_sections)
+                content.order = i % 10
+                to_update.append(content)
+
+        if to_update:
+            CourseContent.objects.bulk_update(to_update, ['section', 'order'], batch_size=200)
+
+        self.stdout.write(f'  → {CourseSection.objects.count()} sections dibuat')
+        self.stdout.write(f'  → {len(to_update)} konten di-assign ke sections')
+
+    # -------------------------------------------------------------------------
+    # Step 7: Buat 1000+ Comment
     # -------------------------------------------------------------------------
     def _seed_comments(self, contents, members):
-        self.stdout.write('\n[6/6] Membuat 1000+ komentar...')
+        self.stdout.write('\n[7/9] Membuat 1000+ komentar...')
 
         existing_count = Comment.objects.count()
         target = 1000 - existing_count
@@ -378,8 +480,6 @@ class Command(BaseCommand):
             self.stdout.write(f'  → {Comment.objects.count()} komentar tersedia (skip)')
             return
 
-        # Pre-build dict: course_id → list of members untuk efisiensi
-        # Ini menghindari query per komentar saat mencari member yang sesuai
         members_by_course = {}
         for member in members:
             cid = member.course_id_id
@@ -388,7 +488,7 @@ class Command(BaseCommand):
             members_by_course[cid].append(member)
 
         to_create = []
-        fallback_members = members[:20]  # Fallback jika course tidak punya member
+        fallback_members = members[:20]
 
         for _ in range(target):
             content = random.choice(contents)
@@ -402,6 +502,94 @@ class Command(BaseCommand):
 
         Comment.objects.bulk_create(to_create, batch_size=500)
         self.stdout.write(f'  → {Comment.objects.count()} komentar tersedia')
+
+    # -------------------------------------------------------------------------
+    # Step 8: Buat Reviews
+    # -------------------------------------------------------------------------
+    def _seed_reviews(self, courses, members, students):
+        self.stdout.write('\n[8/9] Membuat reviews course...')
+
+        if CourseReview.objects.count() > 0:
+            self.stdout.write(f'  → {CourseReview.objects.count()} reviews sudah ada (skip)')
+            return
+
+        # Build set pasangan (course_id, user_id) yang sudah enroll
+        enrolled_pairs = {
+            (m.course_id_id, m.user_id_id): m for m in members
+        }
+
+        to_create = []
+        created_pairs = set()
+        target = 300
+
+        attempts = 0
+        while len(to_create) < target and attempts < 5000:
+            attempts += 1
+            course = random.choice(courses)
+            student = random.choice(students)
+            pair = (course.id, student.id)
+
+            # Hanya buat review jika student sudah enroll dan belum review
+            if pair in enrolled_pairs and pair not in created_pairs:
+                created_pairs.add(pair)
+                to_create.append(CourseReview(
+                    course=course,
+                    user=student,
+                    rating=random.choices([1, 2, 3, 4, 5], weights=[5, 10, 20, 35, 30])[0],
+                    review=random.choice(REVIEW_TEXTS) if random.random() > 0.3 else '',
+                ))
+
+        CourseReview.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
+
+        # Recalculate rating_avg dan total_reviews untuk setiap course
+        reviews_agg = (
+            CourseReview.objects
+            .values('course_id')
+            .annotate(avg=Avg('rating'), total=Count('id'))
+        )
+        to_update = []
+        agg_map = {r['course_id']: r for r in reviews_agg}
+        for course in courses:
+            if course.id in agg_map:
+                course.rating_avg = round(agg_map[course.id]['avg'] or 0, 2)
+                course.total_reviews = agg_map[course.id]['total']
+                to_update.append(course)
+
+        if to_update:
+            Course.objects.bulk_update(to_update, ['rating_avg', 'total_reviews'], batch_size=200)
+
+        self.stdout.write(f'  → {CourseReview.objects.count()} reviews dibuat')
+
+    # -------------------------------------------------------------------------
+    # Step 9: Buat Wishlist
+    # -------------------------------------------------------------------------
+    def _seed_wishlist(self, courses, students):
+        self.stdout.write('\n[9/9] Membuat wishlist...')
+
+        if Wishlist.objects.count() > 0:
+            self.stdout.write(f'  → {Wishlist.objects.count()} wishlist sudah ada (skip)')
+            return
+
+        to_create = []
+        created_pairs = set()
+        target = 200
+
+        attempts = 0
+        while len(to_create) < target and attempts < 3000:
+            attempts += 1
+            course = random.choice(courses)
+            student = random.choice(students)
+            pair = (student.id, course.id)
+
+            if pair not in created_pairs:
+                created_pairs.add(pair)
+                to_create.append(Wishlist(
+                    user=student,
+                    course=course,
+                ))
+
+        Wishlist.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
+        self.stdout.write(f'  → {Wishlist.objects.count()} wishlist dibuat')
 
     # -------------------------------------------------------------------------
     # Summary
@@ -421,8 +609,12 @@ class Command(BaseCommand):
         self.stdout.write(
             f"  User mahasiswa  : {User.objects.filter(username__startswith='mhs').count()}"
         )
+        self.stdout.write(f'  Category        : {Category.objects.count()}')
         self.stdout.write(f'  Course          : {Course.objects.count()}')
+        self.stdout.write(f'  CourseSection   : {CourseSection.objects.count()}')
         self.stdout.write(f'  CourseMember    : {CourseMember.objects.count()}')
         self.stdout.write(f'  CourseContent   : {CourseContent.objects.count()}')
+        self.stdout.write(f'  CourseReview    : {CourseReview.objects.count()}')
+        self.stdout.write(f'  Wishlist        : {Wishlist.objects.count()}')
         self.stdout.write(f'  Comment         : {Comment.objects.count()}')
         self.stdout.write(self.style.HTTP_INFO('-' * 55))

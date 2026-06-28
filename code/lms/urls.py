@@ -5,6 +5,11 @@ from django.urls import path, include
 
 from courses.api import api
 
+# Mount analytics router ke API yang sudah ada
+# Semua endpoint analytics muncul di Swagger yang sama (/api/v1/docs)
+from analytics.api import analytics_router
+api.add_router("/analytics/", analytics_router)
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     # path('silk/', include('silk.urls', namespace='silk')),

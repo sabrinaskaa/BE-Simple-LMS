@@ -53,11 +53,21 @@ services:
       - mongo_data:/data/db
 
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3-management-alpine
     container_name: lms-rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: password123
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   celery-worker:
     image: kaqfa/be_simple_lms-django
@@ -67,6 +77,10 @@ services:
       - ./code:/code
     env_file:
       - .env
+    environment:
+      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - app
       - redis
@@ -81,11 +95,12 @@ services:
       - ./code:/code
     env_file:
       - .env
+    environment:
+      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
-      - app
-      - redis
-      - mongodb
-      - rabbitmq
+      - celery-worker
 
   flower:
     image: kaqfa/be_simple_lms-django
@@ -96,8 +111,9 @@ services:
     ports:
       - "5555:5555"
     environment:
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - celery-worker
       - rabbitmq
@@ -106,3 +122,4 @@ volumes:
   pg_data:
   redis_data:
   mongo_data:
+  rabbitmq_data:
