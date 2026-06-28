@@ -135,3 +135,21 @@ class TaskStatusOut(Schema):
     task_id: str
     status: str
     result: Optional[dict] = None
+
+
+# PAGINATION SCHEMAS
+
+class PaginatedEnrollmentOut(Schema):
+    total: int
+    page: int
+    page_size: int
+    data: List[EnrollmentOut]
+
+
+# FILE UPLOAD SCHEMAS
+
+class FileUploadOut(Schema):
+    content_id: int
+    filename: str
+    url: str
+    size: Optional[int] = None

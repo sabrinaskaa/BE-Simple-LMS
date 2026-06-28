@@ -6,32 +6,40 @@ from django.contrib.auth.models import User
 from ninja.security import HttpBearer
 
 
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-REFRESH_TOKEN_EXPIRE_DAYS = 7
-JWT_ALGORITHM = "HS256"
+def _get_jwt_algorithm() -> str:
+    return getattr(settings, "JWT_ALGORITHM", "HS256")
+
+
+def _get_access_expire_minutes() -> int:
+    return getattr(settings, "JWT_ACCESS_TOKEN_EXPIRE_MINUTES", 30)
+
+
+def _get_refresh_expire_days() -> int:
+    return getattr(settings, "JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7)
 
 
 def create_token(user: User, token_type: str = "access") -> str:
     now = datetime.now(timezone.utc)
+    algorithm = _get_jwt_algorithm()
 
     if token_type == "access":
-        expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = now + timedelta(minutes=_get_access_expire_minutes())
     else:
-        expire = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        expire = now + timedelta(days=_get_refresh_expire_days())
 
+    # Hanya simpan user_id di payload — tidak ada data PII seperti username/email.
     payload = {
         "token_type": token_type,
         "user_id": user.id,
-        "username": user.username,
         "exp": expire,
         "iat": now,
     }
 
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=algorithm)
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, settings.SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    return jwt.decode(token, settings.SECRET_KEY, algorithms=[_get_jwt_algorithm()])
 
 
 class JWTAuth(HttpBearer):

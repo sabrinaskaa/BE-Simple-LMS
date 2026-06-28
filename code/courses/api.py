@@ -1,4 +1,6 @@
 import math
+import mimetypes
+import os
 from typing import Optional
 
 import jwt
@@ -6,7 +8,8 @@ from celery.result import AsyncResult
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group, User
 from django.db.models import Q
-from ninja import NinjaAPI
+from django.http import FileResponse
+from ninja import NinjaAPI, UploadedFile, File
 from ninja.errors import HttpError
 
 from .auth import api_auth, create_token, decode_token
@@ -20,7 +23,7 @@ from .cache import (
 from .models import Course, CourseMember, CourseContent, LessonProgress
 from .mongo import get_activity_report, get_learning_report, log_activity, log_learning_activity
 from .permissions import require_admin, require_instructor, require_student, is_admin, user_roles
-from .rate_limit import rate_limit
+from .rate_limit import rate_limit, rate_limit_login
 from .schemas import (
     AccessTokenOut,
     CourseIn,
@@ -29,9 +32,11 @@ from .schemas import (
     EnrollmentIn,
     EnrollmentOut,
     ErrorOut,
+    FileUploadOut,
     LoginIn,
     MessageOut,
     PaginatedCourseOut,
+    PaginatedEnrollmentOut,
     ProgressIn,
     ProgressOut,
     RefreshIn,
@@ -136,7 +141,7 @@ def register(request, data: RegisterIn):
 
 
 @api.post("/auth/login", response={200: TokenOut, 401: ErrorOut, 429: ErrorOut}, tags=["Authentication"])
-@rate_limit(limit=60, window=60, prefix="login")
+@rate_limit_login()
 def login(request, data: LoginIn):
     user = authenticate(username=data.username, password=data.password)
     if user is None:
@@ -196,10 +201,11 @@ def update_me(request, data: UserUpdateIn):
 # 2. COURSES PUBLIC ENDPOINTS + REDIS CACHE + RATE LIMIT
 
 @api.get("/courses", response={200: PaginatedCourseOut, 429: ErrorOut}, tags=["Courses"])
-@rate_limit(limit=60, window=60, prefix="courses")
+@rate_limit(prefix="courses")
 def list_courses(
     request,
     search: Optional[str] = None,
+    instructor_id: Optional[int] = None,
     min_price: Optional[int] = None,
     max_price: Optional[int] = None,
     ordering: str = "-created_at",
@@ -220,6 +226,8 @@ def list_courses(
     qs = Course.objects.select_related("teacher").all()
     if search:
         qs = qs.filter(Q(name__icontains=search) | Q(description__icontains=search))
+    if instructor_id is not None:
+        qs = qs.filter(teacher_id=instructor_id)
     if min_price is not None:
         qs = qs.filter(price__gte=min_price)
     if max_price is not None:
@@ -326,15 +334,27 @@ def enroll_to_course(request, data: EnrollmentIn):
     return 201, serialize_enrollment(member)
 
 
-@api.get("/enrollments/my-courses", auth=api_auth, response=list[EnrollmentOut], tags=["Enrollments"])
-def my_courses(request):
-    members = (
+@api.get("/enrollments/my-courses", auth=api_auth, response={200: PaginatedEnrollmentOut, 401: ErrorOut}, tags=["Enrollments"])
+def my_courses(request, page: int = 1, page_size: int = 10):
+    page = max(page, 1)
+    page_size = max(min(page_size, 100), 1)
+
+    qs = (
         CourseMember.objects.select_related("course_id", "user_id")
         .filter(user_id=request.user)
         .order_by("course_id__name")
     )
+    total = qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+
     log_activity(request.user, "view_my_courses", {})
-    return [serialize_enrollment(member) for member in members]
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "data": [serialize_enrollment(member) for member in qs[start:end]],
+    }
 
 
 @api.post("/enrollments/{enrollment_id}/progress", auth=api_auth, response={201: ProgressOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut}, tags=["Enrollments"])
@@ -405,3 +425,87 @@ def activity_report(request, limit: int = 20):
 @require_admin
 def learning_report(request, limit: int = 20):
     return get_learning_report(limit=limit)
+
+
+# 6. FILE UPLOAD / DOWNLOAD ENDPOINTS
+
+_ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".mp4", ".png", ".jpg", ".jpeg"}
+_MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB fallback; dioverride dari settings jika tersedia
+
+
+def _validate_upload(uploaded_file: UploadedFile) -> None:
+    from django.conf import settings as dj_settings
+    max_size = getattr(dj_settings, "MAX_UPLOAD_SIZE_BYTES", _MAX_SIZE_BYTES)
+    allowed_exts = set(getattr(dj_settings, "ALLOWED_UPLOAD_EXTENSIONS", list(_ALLOWED_EXTENSIONS)))
+
+    # Ukuran
+    uploaded_file.seek(0, 2)  # ke akhir file
+    size = uploaded_file.tell()
+    uploaded_file.seek(0)     # reset ke awal
+    if size > max_size:
+        raise HttpError(400, f"File terlalu besar. Maksimum {max_size // (1024*1024)} MB.")
+
+    # Ekstensi
+    _, ext = os.path.splitext(uploaded_file.name or "")
+    if ext.lower() not in allowed_exts:
+        raise HttpError(400, f"Tipe file tidak diizinkan. Ekstensi yang boleh: {', '.join(sorted(allowed_exts))}")
+
+
+@api.post(
+    "/courses/{course_id}/content/{content_id}/upload",
+    auth=api_auth,
+    response={200: FileUploadOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Files"],
+)
+@rate_limit(prefix="upload")
+def upload_content_file(request, course_id: int, content_id: int, file: UploadedFile = File(...)):
+    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh upload file")
+
+    content = get_object_or_404(CourseContent, id=content_id, course_id=course)
+
+    _validate_upload(file)
+
+    content.file_attachment.save(file.name, file, save=True)
+    log_activity(request.user, "upload_content_file", {"course_id": course_id, "content_id": content_id})
+    return {
+        "content_id": content.id,
+        "filename": os.path.basename(content.file_attachment.name),
+        "url": request.build_absolute_uri(content.file_attachment.url),
+        "size": file.size if hasattr(file, 'size') else None,
+    }
+
+
+@api.get(
+    "/courses/{course_id}/content/{content_id}/download",
+    auth=api_auth,
+    tags=["Files"],
+    response={401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+)
+def download_content_file(request, course_id: int, content_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    content = get_object_or_404(CourseContent, id=content_id, course_id=course)
+
+    # Cek akses: owner/admin atau member yang sudah enroll
+    if not is_course_owner_or_admin(request.user, course):
+        is_enrolled = CourseMember.objects.filter(course_id=course, user_id=request.user).exists()
+        if not is_enrolled:
+            raise HttpError(403, "Anda harus enroll ke course ini untuk mengunduh file")
+
+    if not content.file_attachment:
+        raise HttpError(404, "File attachment tidak tersedia untuk konten ini")
+
+    file_path = content.file_attachment.path
+    if not os.path.exists(file_path):
+        raise HttpError(404, "File tidak ditemukan di server")
+
+    content_type, _ = mimetypes.guess_type(file_path)
+    content_type = content_type or "application/octet-stream"
+    filename = os.path.basename(file_path)
+
+    log_activity(request.user, "download_content_file", {"course_id": course_id, "content_id": content_id})
+    response = FileResponse(open(file_path, "rb"), content_type=content_type)
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+

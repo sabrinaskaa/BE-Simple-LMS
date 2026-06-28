@@ -1,4 +1,4 @@
-# weather_api.py
+
 import json
 import os
 import time
@@ -7,7 +7,6 @@ from typing import Any, Dict
 import redis
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
 CACHE_TTL_SECONDS = 300
 
 redis_client = redis.Redis.from_url(
@@ -46,9 +45,7 @@ def get_weather(city: str) -> Dict[str, Any]:
     data = call_slow_weather_api(city)
     data["cache_status"] = "MISS"
 
-    redis_client.set(cache_key, json.dumps(data))
-
-    redis_client.expire(cache_key, CACHE_TTL_SECONDS)
+    redis_client.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(data))
 
     return data
 

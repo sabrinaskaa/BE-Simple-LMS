@@ -3,13 +3,21 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# SECURITY WARNING: jangan gunakan key ini di production!
-SECRET_KEY = "django-insecure-lab05-db-optimization-simple-lms-key-2025"
+# SECRET_KEY wajib di-set via environment variable di production.
+# Untuk development lokal, gunakan nilai default hanya jika belum di-set.
+SECRET_KEY = os.environ.get(
+    "DJANGO_SECRET_KEY",
+    "django-insecure-lab05-db-optimization-simple-lms-key-2025",
+)
 
-# SECURITY WARNING: matikan DEBUG di production!
-DEBUG = True
+# Baca DEBUG dari environment. Default False untuk keamanan production.
+DEBUG = os.environ.get("DEBUG", "False").lower() in ("true", "1", "yes")
 
-ALLOWED_HOSTS = ['*']
+# Jika DEBUG aktif, izinkan semua host (development). Di production, isi dengan domain nyata.
+if DEBUG:
+    ALLOWED_HOSTS = ["*"]
+else:
+    ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 
 
 # =============================================================================
@@ -73,11 +81,11 @@ WSGI_APPLICATION = "lms.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "lms_db",
-        "USER": "postgres",
-        "PASSWORD": "postgres",
-        "HOST": "database",  # Nama service di docker-compose.yml
-        "PORT": "5432",
+        "NAME": os.environ.get("POSTGRES_DB", "lms_db"),
+        "USER": os.environ.get("POSTGRES_USER", "postgres"),
+        "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "postgres"),
+        "HOST": os.environ.get("POSTGRES_HOST", "database"),
+        "PORT": os.environ.get("POSTGRES_PORT", "5432"),
     }
 }
 
@@ -123,6 +131,47 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+
+# =============================================================================
+# JWT Settings (dipakai oleh courses/auth.py)
+# =============================================================================
+JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+
+
+# =============================================================================
+# Rate Limit Settings (dipakai oleh courses/rate_limit.py)
+# =============================================================================
+RATE_LIMIT_LOGIN_LIMIT = int(os.environ.get("RATE_LIMIT_LOGIN_LIMIT", "5"))
+RATE_LIMIT_LOGIN_WINDOW = int(os.environ.get("RATE_LIMIT_LOGIN_WINDOW", "60"))   # detik
+RATE_LIMIT_ANON_LIMIT = int(os.environ.get("RATE_LIMIT_ANON_LIMIT", "60"))
+RATE_LIMIT_AUTH_LIMIT = int(os.environ.get("RATE_LIMIT_AUTH_LIMIT", "120"))
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))               # detik
+
+
+# =============================================================================
+# File Upload Settings
+# =============================================================================
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("FILE_UPLOAD_MAX_MEMORY_SIZE", str(10 * 1024 * 1024)))  # 10 MB
+DATA_UPLOAD_MAX_MEMORY_SIZE = FILE_UPLOAD_MAX_MEMORY_SIZE
+ALLOWED_UPLOAD_EXTENSIONS = [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".mp4", ".png", ".jpg", ".jpeg"]
+MAX_UPLOAD_SIZE_BYTES = int(os.environ.get("MAX_UPLOAD_SIZE_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+
+
+# =============================================================================
+# Security headers (aktif di production / non-DEBUG)
+# =============================================================================
+if not DEBUG:
+    SECURE_HSTS_SECONDS = 31536000          # 1 tahun
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
 
 
 # =============================================================================

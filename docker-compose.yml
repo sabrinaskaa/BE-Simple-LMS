@@ -9,6 +9,12 @@ services:
       - "8000:8000"
     environment:
       - DEBUG=True
+      - DJANGO_SECRET_KEY=django-dev-secret-change-me-in-production-a1b2c3d4e5
+      - POSTGRES_DB=lms_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_HOST=database
+      - POSTGRES_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
@@ -63,6 +69,13 @@ services:
     volumes:
       - ./code:/code
     environment:
+      - DEBUG=True
+      - DJANGO_SECRET_KEY=django-dev-secret-change-me-in-production-a1b2c3d4e5
+      - POSTGRES_DB=lms_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_HOST=database
+      - POSTGRES_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
@@ -81,6 +94,13 @@ services:
     volumes:
       - ./code:/code
     environment:
+      - DEBUG=True
+      - DJANGO_SECRET_KEY=django-dev-secret-change-me-in-production-a1b2c3d4e5
+      - POSTGRES_DB=lms_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_HOST=database
+      - POSTGRES_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
