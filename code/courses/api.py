@@ -47,6 +47,7 @@ from .schemas import (
     EnrollmentProgressDetailOut,
     ErrorOut,
     FileUploadOut,
+    LessonProgressItemOut,
     LoginIn,
     MessageOut,
     PaginatedCategoryOut,
@@ -72,6 +73,7 @@ from .schemas import (
     TokenOut,
     UserOut,
     UserUpdateIn,
+    WishlistDashboardOut,
     WishlistIn,
     WishlistOut,
 )
@@ -100,9 +102,13 @@ api = NinjaAPI(
 # HELPER
 
 def get_object_or_404(model, **kwargs):
-    obj = model.objects.filter(**kwargs).first()
+    if hasattr(model, 'objects'):
+        obj = model.objects.filter(**kwargs).first()
+    else:
+        obj = model.filter(**kwargs).first()
     if obj is None:
-        raise HttpError(404, f"{model.__name__} tidak ditemukan")
+        model_name = getattr(model, '__name__', 'Data')
+        raise HttpError(404, f"{model_name} tidak ditemukan")
     return obj
 
 
@@ -624,7 +630,9 @@ def detail_content(request, course_id: int, content_id: int):
     summary="Tambah lesson baru ke course (Instructor/Admin)",
 )
 def create_content(request, course_id: int, data: ContentIn):
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = Course.objects.select_related("teacher").filter(id=course_id).first()
+    if course is None:
+        raise HttpError(404, "Course tidak ditemukan")
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh menambahkan konten")
 
@@ -667,7 +675,9 @@ def create_content(request, course_id: int, data: ContentIn):
     summary="Update lesson (Instructor/Admin)",
 )
 def update_content(request, course_id: int, content_id: int, data: ContentUpdateIn):
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = Course.objects.select_related("teacher").filter(id=course_id).first()
+    if course is None:
+        raise HttpError(404, "Course tidak ditemukan")
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh mengedit konten")
 
@@ -710,7 +720,9 @@ def update_content(request, course_id: int, content_id: int, data: ContentUpdate
     summary="Hapus lesson (Instructor/Admin)",
 )
 def delete_content(request, course_id: int, content_id: int):
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = Course.objects.select_related("teacher").filter(id=course_id).first()
+    if course is None:
+        raise HttpError(404, "Course tidak ditemukan")
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh menghapus konten")
 
@@ -768,7 +780,9 @@ def my_courses(request, page: int = 1, page_size: int = 10):
 
 @api.post("/enrollments/{enrollment_id}/progress", auth=api_auth, response={201: ProgressOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut}, tags=["Enrollments"])
 def mark_lesson_complete(request, enrollment_id: int, data: ProgressIn):
-    member = get_object_or_404(CourseMember.objects.select_related("course_id", "user_id"), id=enrollment_id)
+    member = CourseMember.objects.select_related("course_id", "user_id").filter(id=enrollment_id).first()
+    if member is None:
+        raise HttpError(404, "CourseMember tidak ditemukan")
     if member.user_id_id != request.user.id:
         raise HttpError(403, "Anda tidak boleh mengubah progress enrollment milik user lain")
 
@@ -829,10 +843,6 @@ def task_status(request, task_id: str):
 
 @api.post("/reports/generate/{course_id}/", auth=api_auth, response={202: TaskOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut}, tags=["Async Tasks"])
 def generate_report(request, course_id: int):
-    """
-    Trigger pembuatan laporan statistik course secara async.
-    Kembalikan task_id untuk polling status.
-    """
     course = get_object_or_404(Course, id=course_id)
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh generate report")
@@ -850,10 +860,6 @@ def generate_report(request, course_id: int):
 
 @api.get("/reports/status/{task_id}/", response={200: TaskStatusOut, 401: ErrorOut}, tags=["Async Tasks"])
 def report_status(request, task_id: str):
-    """
-    Cek status task generate_course_report.
-    Poll endpoint ini hingga status == 'SUCCESS', lalu baca field 'result'.
-    """
     result = AsyncResult(task_id)
     response = {
         "task_id": task_id,
@@ -914,7 +920,9 @@ def _validate_upload(uploaded_file: UploadedFile) -> None:
 )
 @rate_limit(prefix="upload")
 def upload_content_file(request, course_id: int, content_id: int, file: UploadedFile = File(...)):
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = Course.objects.select_related("teacher").filter(id=course_id).first()
+    if course is None:
+        raise HttpError(404, "Course tidak ditemukan")
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh upload file")
 
@@ -989,7 +997,9 @@ def _serialize_section(section: CourseSection) -> dict:
     summary="Buat section baru di course (Owner/Admin)",
 )
 def create_section(request, course_id: int, data: SectionIn):
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = Course.objects.select_related("teacher").filter(id=course_id).first()
+    if course is None:
+        raise HttpError(404, "Course tidak ditemukan")
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh membuat section")
 
@@ -1044,7 +1054,9 @@ def list_sections(request, course_id: int):
     summary="Update section (Owner/Admin)",
 )
 def update_section(request, course_id: int, section_id: int, data: SectionUpdateIn):
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = Course.objects.select_related("teacher").filter(id=course_id).first()
+    if course is None:
+        raise HttpError(404, "Course tidak ditemukan")
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh mengupdate section")
 
@@ -1067,7 +1079,9 @@ def update_section(request, course_id: int, section_id: int, data: SectionUpdate
     summary="Hapus section (Owner/Admin)",
 )
 def delete_section(request, course_id: int, section_id: int):
-    course = get_object_or_404(Course.objects.select_related("teacher"), id=course_id)
+    course = Course.objects.select_related("teacher").filter(id=course_id).first()
+    if course is None:
+        raise HttpError(404, "Course tidak ditemukan")
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh menghapus section")
 
@@ -1087,24 +1101,24 @@ def delete_section(request, course_id: int, section_id: int):
     summary="Detail progress belajar per section",
 )
 def enrollment_progress_detail(request, enrollment_id: int):
-    member = get_object_or_404(
-        CourseMember.objects.select_related("course_id", "user_id"), id=enrollment_id
-    )
+    member = CourseMember.objects.select_related("course_id", "user_id").filter(id=enrollment_id).first()
+    if member is None:
+        raise HttpError(404, "CourseMember tidak ditemukan")
     if member.user_id_id != request.user.id and not is_admin(request.user):
         raise HttpError(403, "Tidak boleh melihat progress enrollment milik user lain")
 
     course = member.course_id
-    all_contents = CourseContent.objects.filter(course_id=course).select_related("section")
+    all_contents = list(CourseContent.objects.filter(course_id=course).select_related("section").order_by("order"))
     completed_ids = set(
         LessonProgress.objects.filter(member=member, is_completed=True)
         .values_list("content_id", flat=True)
     )
 
-    total_lessons = all_contents.count()
+    total_lessons = len(all_contents)
     completed_lessons = len([c for c in all_contents if c.id in completed_ids])
     progress_percent = round((completed_lessons / total_lessons * 100), 2) if total_lessons > 0 else 0.0
 
-    # Build per-section breakdown
+    # Build per-section breakdown with per-lesson detail
     sections_map: dict = {}
     unsectioned_lessons = []
 
@@ -1117,10 +1131,16 @@ def enrollment_progress_detail(request, enrollment_id: int):
                     "section_title": content.section.title if content.section else "",
                     "total": 0,
                     "completed": 0,
+                    "lessons": [],
                 }
             sections_map[sid]["total"] += 1
             if content.id in completed_ids:
                 sections_map[sid]["completed"] += 1
+            sections_map[sid]["lessons"].append({
+                "lesson_id": content.id,
+                "title": content.name,
+                "is_completed": content.id in completed_ids,
+            })
         else:
             unsectioned_lessons.append(content)
 
@@ -1130,6 +1150,8 @@ def enrollment_progress_detail(request, enrollment_id: int):
             "section_title": v["section_title"],
             "total_lessons": v["total"],
             "completed_lessons": v["completed"],
+            "progress_percent": round(v["completed"] / v["total"] * 100, 2) if v["total"] > 0 else 0.0,
+            "lessons": v["lessons"],
         }
         for v in sorted(sections_map.values(), key=lambda x: x["section_id"])
     ]
@@ -1137,11 +1159,21 @@ def enrollment_progress_detail(request, enrollment_id: int):
     # Append unsectioned lessons as a virtual section
     if unsectioned_lessons:
         unsectioned_completed = len([c for c in unsectioned_lessons if c.id in completed_ids])
+        unsectioned_total = len(unsectioned_lessons)
         sections_out.append({
             "section_id": None,
             "section_title": "Tanpa Section",
-            "total_lessons": len(unsectioned_lessons),
+            "total_lessons": unsectioned_total,
             "completed_lessons": unsectioned_completed,
+            "progress_percent": round(unsectioned_completed / unsectioned_total * 100, 2) if unsectioned_total > 0 else 0.0,
+            "lessons": [
+                {
+                    "lesson_id": c.id,
+                    "title": c.name,
+                    "is_completed": c.id in completed_ids,
+                }
+                for c in unsectioned_lessons
+            ],
         })
 
     return {
@@ -1263,16 +1295,17 @@ def _serialize_wishlist(wl: Wishlist) -> dict:
 @api.post(
     "/wishlist",
     auth=api_auth,
-    response={201: WishlistOut, 400: ErrorOut, 401: ErrorOut, 404: ErrorOut},
+    response={201: WishlistOut, 400: ErrorOut, 401: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     tags=["Wishlist"],
     summary="Tambah course ke wishlist",
 )
 def add_to_wishlist(request, data: WishlistIn):
     course = get_object_or_404(Course, id=data.course_id)
     if Wishlist.objects.filter(user=request.user, course=course).exists():
-        raise HttpError(400, "Course sudah ada di wishlist")
+        raise HttpError(409, "Kamu sudah menambahkan course ini ke wishlist")
 
     wl = Wishlist.objects.create(user=request.user, course=course)
+    invalidate_dashboard_cache(request.user.id)
     log_activity(request.user, "add_wishlist", {"course_id": data.course_id})
     return 201, _serialize_wishlist(wl)
 
@@ -1287,6 +1320,7 @@ def add_to_wishlist(request, data: WishlistIn):
 def remove_from_wishlist(request, course_id: int):
     wl = get_object_or_404(Wishlist, user=request.user, course_id=course_id)
     wl.delete()
+    invalidate_dashboard_cache(request.user.id)
     log_activity(request.user, "remove_wishlist", {"course_id": course_id})
     return {"message": "Course berhasil dihapus dari wishlist"}
 
@@ -1364,8 +1398,19 @@ def student_dashboard(request):
         else:
             active_courses.append(course_entry)
 
-    # Wishlist count
+    # Wishlist count + list
+    wishlist_qs = Wishlist.objects.filter(user=user).select_related("course", "course__teacher").order_by("-created_at")[:10]
     wishlist_count = Wishlist.objects.filter(user=user).count()
+    wishlist_list = [
+        {
+            "course_id": wl.course.id,
+            "course_name": wl.course.name,
+            "rating_avg": wl.course.rating_avg,
+            "price": wl.course.price,
+            "instructor_name": wl.course.teacher.get_full_name() or wl.course.teacher.username,
+        }
+        for wl in wishlist_qs
+    ]
 
     # Recommended: top-5 rated courses, belum di-enroll, dari kategori yang sama
     enrolled_course_ids = set(enrollments.values_list("course_id_id", flat=True))
@@ -1375,6 +1420,7 @@ def student_dashboard(request):
         .select_related("teacher")
         .order_by("-rating_avg")[:5]
     )
+    reason = "Populer di platform"
     # Filter berdasarkan kategori yang sama jika ada
     if enrolled_category_ids:
         cat_qs = (
@@ -1385,6 +1431,7 @@ def student_dashboard(request):
         )
         if cat_qs.exists():
             recommended_qs = cat_qs
+            reason = "Populer di kategori yang sama"
 
     recommended = [
         {
@@ -1394,6 +1441,7 @@ def student_dashboard(request):
             "total_reviews": c.total_reviews,
             "price": c.price,
             "instructor_name": c.teacher.get_full_name() or c.teacher.username,
+            "reason": reason,
         }
         for c in recommended_qs
     ]
@@ -1404,10 +1452,11 @@ def student_dashboard(request):
         "total_enrolled": len(active_courses) + len(completed_courses),
         "total_completed": len(completed_courses),
         "wishlist_count": wishlist_count,
+        "wishlist": wishlist_list,
         "recommended_courses": recommended,
     }
 
-    # Cache selama 5 menit
-    cache_set(cache_key, response, timeout=300)
+    # Cache selama 3 menit
+    cache_set(cache_key, response, timeout=180)
     log_activity(user, "view_student_dashboard", {})
     return response

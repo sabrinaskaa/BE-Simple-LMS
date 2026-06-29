@@ -167,6 +167,7 @@ class Command(BaseCommand):
         self._seed_comments(contents, members)
         self._seed_reviews(courses, members, students)
         self._seed_wishlist(courses, students)
+        self._seed_lesson_progress(members, contents)
 
         self._print_summary()
 
@@ -592,6 +593,84 @@ class Command(BaseCommand):
         self.stdout.write(f'  → {Wishlist.objects.count()} wishlist dibuat')
 
     # -------------------------------------------------------------------------
+    # Step 10: Seed LessonProgress untuk demo student (mhs001)
+    # Agar dashboard terlihat realistis: beberapa course aktif dengan progress bervariasi
+    # -------------------------------------------------------------------------
+    def _seed_lesson_progress(self, members, contents):
+        self.stdout.write('\n[10/10] Membuat lesson progress demo untuk mhs001...')
+
+        if LessonProgress.objects.count() > 0:
+            self.stdout.write(f'  → {LessonProgress.objects.count()} lesson progress sudah ada (skip)')
+            return
+
+        # Cari mhs001
+        try:
+            mhs001 = User.objects.get(username='mhs001')
+        except User.DoesNotExist:
+            self.stdout.write('  → mhs001 tidak ditemukan, skip')
+            return
+
+        # Ambil enrollment mhs001
+        mhs_memberships = list(
+            CourseMember.objects.filter(user_id=mhs001).select_related('course_id')
+        )
+        if not mhs_memberships:
+            self.stdout.write('  → mhs001 tidak memiliki enrollment, skip')
+            return
+
+        to_create = []
+        created_pairs = set()
+
+        for i, member in enumerate(mhs_memberships):
+            course = member.course_id
+            course_contents = [c for c in contents if c.course_id_id == course.id]
+            if not course_contents:
+                continue
+
+            # Variasikan progress: course pertama 100%, sisanya 30-70%
+            if i == 0:
+                # Course pertama: selesai semua (completed)
+                selected = course_contents
+            else:
+                # Course lainnya: selesai sebagian (30-70%)
+                n_complete = max(1, int(len(course_contents) * random.uniform(0.3, 0.7)))
+                selected = course_contents[:n_complete]
+
+            for content in selected:
+                pair = (member.id, content.id)
+                if pair not in created_pairs:
+                    created_pairs.add(pair)
+                    to_create.append(LessonProgress(
+                        member=member,
+                        content=content,
+                        is_completed=True,
+                    ))
+
+        # Tambahkan beberapa progress untuk student lain agar data lebih kaya
+        other_members = [m for m in members if m.user_id_id != mhs001.id][:50]
+        for member in other_members:
+            course = member.course_id
+            course_contents = [c for c in contents if c.course_id_id == course.id]
+            if not course_contents:
+                continue
+            # Tandai 1-3 lesson acak sebagai selesai
+            n = random.randint(1, min(3, len(course_contents)))
+            for content in random.sample(course_contents, n):
+                pair = (member.id, content.id)
+                if pair not in created_pairs:
+                    created_pairs.add(pair)
+                    to_create.append(LessonProgress(
+                        member=member,
+                        content=content,
+                        is_completed=True,
+                    ))
+
+        if to_create:
+            LessonProgress.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
+
+        self.stdout.write(f'  → {LessonProgress.objects.count()} lesson progress dibuat')
+
+    # -------------------------------------------------------------------------
     # Summary
     # -------------------------------------------------------------------------
     def _print_summary(self):
@@ -614,6 +693,7 @@ class Command(BaseCommand):
         self.stdout.write(f'  CourseSection   : {CourseSection.objects.count()}')
         self.stdout.write(f'  CourseMember    : {CourseMember.objects.count()}')
         self.stdout.write(f'  CourseContent   : {CourseContent.objects.count()}')
+        self.stdout.write(f'  LessonProgress  : {LessonProgress.objects.count()}')
         self.stdout.write(f'  CourseReview    : {CourseReview.objects.count()}')
         self.stdout.write(f'  Wishlist        : {Wishlist.objects.count()}')
         self.stdout.write(f'  Comment         : {Comment.objects.count()}')

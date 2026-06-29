@@ -55,6 +55,11 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = "lms.urls"
 
+# Django Ninja tidak menggunakan trailing slash pada URL-nya.
+# Nonaktifkan APPEND_SLASH agar PATCH/DELETE tidak di-redirect ke URL dengan trailing slash
+# yang menyebabkan 404 pada endpoint seperti /courses/{id}/sections/{sid}
+APPEND_SLASH = False
+
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",

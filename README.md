@@ -294,6 +294,57 @@ Setiap HTTP request ke API secara otomatis terekam ke MongoDB `request_logs` sec
 
 ---
 
+## Cara Menjalankan Test
+
+Test suite proyek ini mencakup **authentication**, **fitur LMS**, dan **permission/RBAC**.
+
+### Prasyarat
+
+Pastikan semua container sudah berjalan:
+
+```bash
+docker compose up -d
+```
+
+### Jalankan Semua Test
+
+```bash
+docker compose exec app python manage.py test courses --verbosity=2
+```
+
+### Jalankan Per Modul
+
+```bash
+# Test Authentication (register, login, refresh, profil)
+docker compose exec app python manage.py test courses.test_auth --verbosity=2
+
+# Test Fitur LMS (search, filter, review, wishlist, progress, dashboard)
+docker compose exec app python manage.py test courses.test_courses --verbosity=2
+
+# Test Permission & RBAC (kontrol akses per role)
+docker compose exec app python manage.py test courses.test_permissions --verbosity=2
+```
+
+### Contoh Output
+
+```
+System check identified no issues (0 silenced).
+
+test_admin_bisa_buat_course (courses.test_permissions.RBACCreateCourseTest) ... ok
+test_instructor_bisa_buat_course (courses.test_permissions.RBACCreateCourseTest) ... ok
+test_student_tidak_bisa_buat_course (courses.test_permissions.RBACCreateCourseTest) ... ok
+test_unauthenticated_tidak_bisa_buat_course (courses.test_permissions.RBACCreateCourseTest) ... ok
+...
+
+Ran 42 tests in 8.321s
+
+OK
+```
+
+> **Catatan**: Test menggunakan SQLite in-memory sehingga tidak membutuhkan koneksi PostgreSQL aktif. Redis dan MongoDB di-mock pada sebagian test yang tidak memerlukan integrasi nyata.
+
+---
+
 ## Struktur Project
 
 ```

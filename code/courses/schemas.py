@@ -292,11 +292,19 @@ class PaginatedWishlistOut(Schema):
 
 # PROGRESS DETAIL SCHEMAS
 
+class LessonProgressItemOut(Schema):
+    lesson_id: int
+    title: str
+    is_completed: bool
+
+
 class SectionProgressOut(Schema):
     section_id: Optional[int] = None
     section_title: str
     total_lessons: int
     completed_lessons: int
+    progress_percent: float
+    lessons: List[LessonProgressItemOut]
 
 
 class EnrollmentProgressDetailOut(Schema):
@@ -324,6 +332,15 @@ class RecommendedCourseOut(Schema):
     total_reviews: int
     price: int
     instructor_name: str
+    reason: str = "Populer di kategori yang sama"
+
+
+class WishlistDashboardOut(Schema):
+    course_id: int
+    course_name: str
+    rating_avg: Decimal
+    price: int
+    instructor_name: str
 
 
 class StudentDashboardOut(Schema):
@@ -332,6 +349,7 @@ class StudentDashboardOut(Schema):
     total_enrolled: int
     total_completed: int
     wishlist_count: int
+    wishlist: List[WishlistDashboardOut]
     recommended_courses: List[RecommendedCourseOut]
 
 
