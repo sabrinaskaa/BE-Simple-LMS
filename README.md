@@ -308,11 +308,44 @@ Course dapat mensyaratkan penyelesaian course lain. Enrollment otomatis ditolak 
 
 ### 🤖 Chatbot Assistant (Gemini LLM)
 
+Mekanisme asisten AI interaktif untuk mahasiswa (*Student*) yang dapat merekomendasikan kursus secara cerdas dan menjawab materi belajar.
+
 | Method | Endpoint | Auth | Role | Deskripsi |
 |---|---|---|---|---|
-| `POST` | `/chatbot` | ✅ | Student | Kirim pesan ke asisten AI untuk rekomendasi kursus dan tanya jawab |
+| `POST` | `/chatbot` | ✅ (Bearer) | Student | Kirim pesan teks ke asisten AI Gemini |
 
-> Chatbot terintegrasi dengan **Google Gemini API** (`gemini-flash-latest`). Jika kunci API (`GEMINI_API_KEY`) belum terpasang di file `.env`, chatbot otomatis berjalan dalam **Demo Mode** (menggunakan pencarian kata kunci sederhana dari database lokal).
+#### 1. Skema Request & Response (Django Ninja / Pydantic)
+*   **Request Body (`ChatbotIn`)**:
+    ```json
+    {
+      "message": "Rekomendasikan saya kelas belajar JavaScript"
+    }
+    ```
+*   **Response Body (`ChatbotOut`)**:
+    ```json
+    {
+      "response": "Halo! Berdasarkan data kami, Anda bisa mengambil kursus: **Pemrograman JavaScript Modern**..."
+    }
+    ```
+
+#### 2. Mekanisme Ketahanan & Fallback (Resilience Architecture)
+Untuk mengantisipasi limit kuota atau server Gemini yang sibuk (*HTTP 429/503 High Demand*), endpoint ini menerapkan sistem pertahanan bertingkat:
+1.  **Daftar Alternatif Model (*Candidate Loop*)**:
+    Sistem akan mendeteksi jika model utama padat dan mencoba model alternatif lain secara otomatis dalam satu daur request:
+    `gemini-2.5-flash` $\rightarrow$ `gemini-2.0-flash` $\rightarrow$ `gemini-2.0-flash-lite` $\rightarrow$ `gemini-flash-latest`.
+2.  **Penyaringan Stop Words Bahasa Indonesia**:
+    Jika seluruh request AI gagal, sistem beralih ke pencarian database PostgreSQL lokal. Sistem memfilter kata-kata umum (seperti *"rekomendasi"*, *"belajar"*, *"saya"*, *"materi"*, *"kursus"*) agar pencarian kata kunci relasional menjadi sangat presisi.
+3.  **Pencarian PostgreSQL Lokal**:
+    Sistem mencari kata kunci tersisa pada judul dan deskripsi kursus aktif (*published*) dan menampilkan rekomendasi yang relevan kepada pengguna dengan ramah disertai pemberitahuan bahwa asisten AI sedang sibuk.
+
+#### 3. Integrasi Komponen Frontend (Vite + React)
+*   **Component**: [`src/components/ChatbotPopup.jsx`](file:///d:/Punya%20Aska/Kulyeah/SEMESTER%206/PSS/FE-Simple-LMS/src/components/ChatbotPopup.jsx)
+*   **State Management**:
+    *   `isOpen` (boolean) — Status buka-tutup jendela chat.
+    *   `messages` (array) — Daftar riwayat percakapan (user & bot).
+    *   `input` (string) — Teks input pengguna yang sedang ditulis.
+    *   `isLoading` (boolean) — Animasi loading saat menunggu balasan backend.
+    *   `error` (string) — Penanganan error visual jika terjadi kegagalan jaringan.
 
 ### 📈 Analytics (MongoDB lms_analytics — NEW Chapter 11)
 

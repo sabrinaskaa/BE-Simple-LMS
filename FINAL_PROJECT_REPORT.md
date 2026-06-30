@@ -8,6 +8,7 @@
 - **NIM**: A11.2023.15264
 - **Kelas**: A11.54403 — Pemrograman Sisi Server
 - **URL Repository**: https://github.com/sabrinaskaa/BE-Simple-LMS
+- **Deployment Link**: https://fe-simple-lms.vercel.app/
 
 ---
 
@@ -508,13 +509,86 @@ Course dapat mensyaratkan penyelesaian satu atau lebih course lain sebelum stude
 
 ### 7. Student Chatbot Assistant (Gemini LLM)
 
-Fitur ini mengintegrasikan asisten AI interaktif ke dalam dashboard mahasiswa yang ditenagai oleh **Google Gemini API** (`gemini-flash-latest`).
+Fitur ini mengintegrasikan asisten AI virtual interaktif pada halaman dashboard mahasiswa yang ditenagai oleh **Google Gemini API** (`gemini-flash-latest`) untuk memberikan bantuan belajar dan rekomendasi kursus yang cerdas secara real-time.
 
-**Fitur Utama:**
-- **Konteks Kursus**: Chatbot membaca daftar kursus berstatus `published` dari database PostgreSQL secara dinamis dan menggunakannya sebagai konteks pembelajaran.
-- **Rekomendasi Cerdas**: Mahasiswa dapat meminta saran kursus (misalnya: "rekomendasikan kelas pemula"), dan AI akan memilihkan kursus yang paling sesuai beserta alasan kecocokannya.
-- **Tanya Jawab Umum**: Chatbot dapat menjawab pertanyaan umum seputar pemrograman atau materi belajar yang ditanyakan mahasiswa.
-- **Offline Fallback (Demo Mode)**: Jika kunci API (`GEMINI_API_KEY`) belum dikonfigurasi di file `.env`, sistem akan otomatis melakukan pencarian kata kunci sederhana pada database lokal dan menampilkan kursus yang relevan, sehingga fungsionalitas tetap berjalan.
+#### A. Desain Arsitektur & Alur Data (Data Flow)
+Mekanisme chatbot ini dirancang dengan interaksi client-server yang dinamis:
+1. **Context Extraction**: Saat mahasiswa mengirim pesan, backend secara dinamis mengambil daftar seluruh kursus berstatus `published` dari database PostgreSQL (termasuk judul, level, kategori, harga, instruktur, dan deskripsi).
+2. **System Instruction**: Data kursus tersebut dimasukkan ke dalam *system instruction* sebagai basis pengetahuan (knowledge base) lokal bagi AI.
+3. **Payload Construction**: Pesan mahasiswa digabungkan dengan instruksi sistem dan dikirimkan ke Google Gemini API menggunakan protokol HTTPS POST.
+4. **Interactive Response**: Hasil generasi teks dari AI dikembalikan ke frontend dan ditampilkan dalam balon obrolan dengan format Markdown.
+
+```mermaid
+sequenceDiagram
+    participant FE as React Frontend (ChatbotPopup)
+    participant BE as Django Backend (chatbot_assistant)
+    participant DB as PostgreSQL Database
+    participant AI as Google Gemini API (AI Studio)
+
+    FE->>BE: POST /api/v1/chatbot (user message + JWT Token)
+    Note over BE: Verifikasi Role (Student Only)
+    BE->>DB: Query seluruh kursus berstatus 'published'
+    DB-->>BE: Daftar kursus & metadatanya
+    Note over BE: Masukkan kursus ke dalam System Instruction
+    BE->>AI: POST /generateContent (dengan API Key & System Context)
+    
+    alt Sukses
+        AI-->>BE: Generasi respon teks dari AI
+        BE-->>FE: HTTP 200 OK {"response": "..."}
+    else Gagal (Rate Limit / High Demand 503)
+        Note over BE: Coba Model Alternatif (Loop Candidate Models)
+        BE->>AI: POST /generateContent (menggunakan model cadangan)
+        alt Model Cadangan Sukses
+            AI-->>BE: Respon teks model cadangan
+            BE-->>FE: HTTP 200 OK {"response": "..."}
+        else Semua Model Gagal
+            Note over BE: Pemicu Graceful Fallback
+            BE->>BE: Saring Stop Words & cari kursus di Database
+            BE-->>FE: HTTP 200 OK {"response": "[Database Fallback] ..."}
+        end
+    end
+```
+
+#### B. Logika Ketahanan API & Toleransi Kegagalan (Resilience & Fault-Tolerance)
+Google AI Studio menerapkan batas kuota (*rate limit*) yang ketat pada kunci API gratis (*free tier*). Untuk mencegah asisten AI mogok dan mengembalikan kotak error merah yang merusak estetika UI, backend menerapkan sistem perlindungan bertingkat:
+
+1. **Loop Model Alternatif (*Candidate Model Loop*)**:
+   Jika model utama (`gemini-2.5-flash`) mengembalikan error *High Demand* (HTTP 429 atau 503), backend otomatis mengalihkan request secara internal ke model alternatif lainnya secara bergantian dalam satu daur request:
+   $$\text{gemini-2.5-flash} \longrightarrow \text{gemini-2.0-flash} \longrightarrow \text{gemini-2.0-flash-lite} \longrightarrow \text{gemini-flash-latest}$$
+   
+2. **Penyaringan Stop Words Bahasa Indonesia**:
+   Jika semua model AI gagal merespon, sistem akan memicu *Database Fallback*. Sebelum mencari ke database, pesan pengguna disaring dari kata-kata umum (stop words) Indonesia seperti:
+   *`rekomendasi, belajar, kursus, kelas, saya, ingin, cari, tahu, tentang, materi, dosen, kuliah, tanya, bagaimana, cara, yang, untuk, adalah, dengan, pada, oleh, atau, dan, dari, bisa, dapat, course, apa, itu, tolong, bantu, halo, hai`*
+   
+   Hal ini menjamin kata kunci pencarian relasional (PostgreSQL) sangat spesifik (misal: kalimat *"rekomendasikan saya kelas belajar JavaScript"* disaring menjadi kata kunci **`javascript`**).
+
+3. **Database Keyword Fallback**:
+   Sistem mencari kata kunci hasil penyaringan pada field `name` dan `description` tabel `Course` PostgreSQL. Jika ditemukan, sistem menyusun rekomendasi secara otomatis dengan format terstruktur yang ramah, memberi tahu pengguna secara halus bahwa AI sedang mengalami kendala dan menyajikan hasil database lokal.
+
+#### C. Detail Endpoint & Skema Data (Pydantic)
+* **API Endpoint**: `POST /api/v1/chatbot`
+* **Keamanan (Guard & Permissions)**: `@require_student` (Hanya user dengan role **Student** yang diizinkan) dan `auth=api_auth` (Wajib menyertakan Bearer JWT Token).
+* **Skema Input (`ChatbotIn`)**:
+  ```python
+  class ChatbotIn(Schema):
+      message: str  # Pesan teks dari mahasiswa (tidak boleh kosong/whitespace)
+  ```
+* **Skema Output (`ChatbotOut`)**:
+  ```python
+  class ChatbotOut(Schema):
+      response: str # Balasan teks dari asisten (AI Generated / DB Fallback)
+  ```
+
+#### D. Desain UI Komponen Frontend (Vite + React)
+Integrasi antarmuka chat dibangun secara kustom di sisi frontend:
+1. **Floating Action Button (FAB)**: Tombol melayang berlogo robot di pojok kanan bawah halaman dashboard siswa ([`DashboardPage.jsx`](file:///d:/Punya%20Aska/Kulyeah/SEMESTER%206/PSS/FE-Simple-LMS/src/pages/DashboardPage.jsx)) yang memicu membuka/menutup jendela chat.
+2. **Jendela Chat Popup ([`ChatbotPopup.jsx`](file:///d:/Punya%20Aska/Kulyeah/SEMESTER%206/PSS/FE-Simple-LMS/src/components/ChatbotPopup.jsx))**:
+   - **Tampilan Balon Percakapan**: Membedakan balon chat mahasiswa (warna biru, rata kanan) dengan balon chat AI asisten (warna putih keabu-abuan, rata kiri).
+   - **Auto-scroll**: Secara otomatis menggulung layar chat ke bawah setiap kali ada pesan baru masuk menggunakan `useRef` dan `scrollIntoView`.
+   - **Status Loading**: Menampilkan teks animasi *“AI sedang mengetik...”* saat menunggu respon dari backend.
+   - **Quick Action Suggestions (Tombol Saran)**: Menyediakan tombol aksi cepat seperti *"Rekomendasi Course HTML"*, *"Course Pemula Terpopuler"*, dan *"Rekomendasi Belajar JavaScript"* untuk memudahkan mahasiswa memulai percakapan dengan satu klik.
+
+---
 
 **Endpoint baru:**
 - `POST /chatbot` — Mengirimkan pesan mahasiswa ke asisten AI (hanya diakses oleh user ber-role **Student**).
