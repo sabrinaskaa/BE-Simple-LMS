@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils.text import slugify
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.db.models import Q
 
 
 class Category(models.Model):
@@ -37,6 +38,7 @@ LEVEL_OPTIONS = [
 
 STATUS_OPTIONS = [
     ('draft', 'Draft'),
+    ('pending_review', 'Menunggu Review'),
     ('published', 'Dipublikasikan'),
     ('archived', 'Diarsipkan'),
 ]
@@ -55,9 +57,9 @@ class Course(models.Model):
     )
     status = models.CharField(
         "status",
-        max_length=10,
+        max_length=14,
         choices=STATUS_OPTIONS,
-        default='published',
+        default='draft',
     )
     rating_avg = models.DecimalField(
         "rata-rata rating",
@@ -146,7 +148,13 @@ class CourseSection(models.Model):
     class Meta:
         verbose_name = "Section Kelas"
         verbose_name_plural = "Section Kelas"
-        ordering = ["course", "order"]
+        ordering = ["course", "order", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["course", "order"],
+                name="unique_section_order_per_course",
+            ),
+        ]
 
 
 class CourseContent(models.Model):
@@ -189,7 +197,25 @@ class CourseContent(models.Model):
     class Meta:
         verbose_name = "Konten Kelas"
         verbose_name_plural = "Konten Kelas"
-        ordering = ["course_id", "order"]
+        # Urutan: section.order → content.order → id sebagai tiebreaker
+        ordering = ["course_id", "section", "order", "id"]
+        constraints = [
+            # Scope dengan section: (course, section, order) harus unik
+            # Catatan: partial index (condition) tidak bisa dikombinasikan dengan deferrable
+            models.UniqueConstraint(
+                fields=["course_id", "section", "order"],
+                condition=Q(section__isnull=False),
+                name="unique_content_order_per_course_section",
+            ),
+            # Scope tanpa section: (course, order) harus unik
+            # Catatan: PostgreSQL memperlakukan NULL != NULL di UNIQUE INDEX biasa,
+            # sehingga partial index ini diperlukan untuk enforce uniqueness saat section=NULL.
+            models.UniqueConstraint(
+                fields=["course_id", "order"],
+                condition=Q(section__isnull=True),
+                name="unique_content_order_per_course_no_section",
+            ),
+        ]
 
 
 class Comment(models.Model):
@@ -288,3 +314,76 @@ class Wishlist(models.Model):
         verbose_name = "Wishlist"
         verbose_name_plural = "Wishlist"
         unique_together = ("user", "course")
+
+
+PUBLISH_REQUEST_STATUS = [
+    ('pending', 'Menunggu'),
+    ('approved', 'Disetujui'),
+    ('rejected', 'Ditolak'),
+]
+
+
+class CoursePublishRequest(models.Model):
+    """Tracks every publish request an instructor submits for admin review."""
+    course = models.ForeignKey(
+        Course,
+        verbose_name="matkul",
+        on_delete=models.CASCADE,
+        related_name="publish_requests",
+    )
+    requester = models.ForeignKey(
+        User,
+        verbose_name="pengaju",
+        on_delete=models.CASCADE,
+        related_name="publish_requests_sent",
+    )
+    status = models.CharField(
+        "status",
+        max_length=10,
+        choices=PUBLISH_REQUEST_STATUS,
+        default='pending',
+    )
+    reviewer = models.ForeignKey(
+        User,
+        verbose_name="reviewer",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="publish_requests_reviewed",
+    )
+    rejection_reason = models.TextField("alasan penolakan", blank=True, default="")
+    requested_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.course.name} — {self.status} ({self.requester.username})"
+
+    class Meta:
+        verbose_name = "Publish Request"
+        verbose_name_plural = "Publish Requests"
+        ordering = ["-requested_at"]
+
+
+class CoursePrerequisite(models.Model):
+    """A course can require one or more other courses to be completed first."""
+    course = models.ForeignKey(
+        Course,
+        verbose_name="matkul",
+        on_delete=models.CASCADE,
+        related_name="prerequisites",
+    )
+    required_course = models.ForeignKey(
+        Course,
+        verbose_name="matkul prasyarat",
+        on_delete=models.CASCADE,
+        related_name="required_by",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.course.name} membutuhkan {self.required_course.name}"
+
+    class Meta:
+        verbose_name = "Prasyarat Course"
+        verbose_name_plural = "Prasyarat Course"
+        unique_together = ("course", "required_course")

@@ -173,7 +173,8 @@ class ContentIn(Schema):
     video_url: Optional[str] = None
     parent_id: Optional[int] = None
     section_id: Optional[int] = None
-    order: int = 0
+    # None = backend auto-assign order berikutnya dalam scope yang sama
+    order: Optional[int] = None
     duration_minutes: Optional[int] = None
 
 
@@ -211,7 +212,8 @@ class PaginatedContentOut(Schema):
 
 class SectionIn(Schema):
     title: str
-    order: int = 0
+    # None = backend auto-assign order berikutnya dalam course
+    order: Optional[int] = None
 
 
 class SectionUpdateIn(Schema):
@@ -383,3 +385,37 @@ class FileUploadOut(Schema):
     filename: str
     url: str
     size: Optional[int] = None
+
+
+# PUBLISHING WORKFLOW SCHEMAS
+
+class PublishRequestOut(Schema):
+    id: int
+    course_id: int
+    course_name: str
+    requester_id: int
+    requester_username: str
+    status: str
+    reviewer_id: Optional[int] = None
+    reviewer_username: Optional[str] = None
+    rejection_reason: str
+    requested_at: datetime
+    reviewed_at: Optional[datetime] = None
+
+
+class PublishReviewIn(Schema):
+    reason: str = ""
+
+
+# COURSE PREREQUISITE SCHEMAS
+
+class PrerequisiteOut(Schema):
+    id: int
+    course_id: int
+    required_course_id: int
+    required_course_name: str
+    created_at: datetime
+
+
+class PrerequisiteIn(Schema):
+    required_course_id: int

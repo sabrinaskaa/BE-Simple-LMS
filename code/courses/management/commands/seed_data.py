@@ -397,8 +397,25 @@ class Command(BaseCommand):
         existing_count = CourseContent.objects.count()
         to_create = []
 
+        # Hitung order per course agar tidak duplikat dalam scope tanpa section
+        # Key: course.id → counter
+        course_order_counters = {}
+
         for i in range(existing_count, 300):
             course = courses[i % len(courses)]
+            cid = course.id
+
+            # Ambil max order yang sudah ada di DB untuk course ini (scope tanpa section)
+            if cid not in course_order_counters:
+                from django.db.models import Max
+                agg = CourseContent.objects.filter(
+                    course_id=course, section__isnull=True
+                ).aggregate(Max('order'))
+                course_order_counters[cid] = agg['order__max'] or 0
+
+            course_order_counters[cid] += 1
+            order = course_order_counters[cid]
+
             prefix = CONTENT_PREFIXES[i % len(CONTENT_PREFIXES)]
             topic = random.choice(CONTENT_TOPICS)
             to_create.append(CourseContent(
@@ -410,7 +427,7 @@ class Command(BaseCommand):
                 ),
                 course_id=course,
                 parent_id=None,
-                order=i % 10,
+                order=order,
                 duration_minutes=random.choice([15, 20, 30, 45, 60, None]),
             ))
 
@@ -432,7 +449,7 @@ class Command(BaseCommand):
             return
 
         sections_to_create = []
-        # Buat 2-3 sections untuk setiap course (dari 30 course pertama saja agar tidak terlalu banyak)
+        # Buat 2-4 sections untuk setiap course (dari 30 course pertama)
         sample_courses = courses[:30]
         for course in sample_courses:
             num_sections = random.randint(2, 4)
@@ -440,27 +457,41 @@ class Command(BaseCommand):
                 sections_to_create.append(CourseSection(
                     course=course,
                     title=SECTION_TITLES[j % len(SECTION_TITLES)],
-                    order=j,
+                    order=j + 1,  # 1-based, konsisten dan tidak duplikat
                 ))
 
         CourseSection.objects.bulk_create(sections_to_create, batch_size=500)
 
-        # Assign sebagian contents ke sections secara random
+        # Assign sebagian contents ke sections
         all_sections = list(CourseSection.objects.all())
         if not all_sections:
             return
 
-        # Ambil contents yang belum punya section
-        unassigned = list(CourseContent.objects.filter(section__isnull=True)[:150])
+        # Ambil contents yang belum punya section (hanya dari course yang punya section)
+        section_course_ids = {s.course_id for s in all_sections}
+        unassigned = list(
+            CourseContent.objects.filter(
+                section__isnull=True,
+                course_id__in=section_course_ids,
+            )[:150]
+        )
+
+        # Counter order per (course_id, section_id) agar tidak ada duplikat dalam section
+        section_order_counters = {}
         to_update = []
-        for i, content in enumerate(unassigned):
-            section = all_sections[i % len(all_sections)]
-            # Pastikan section dari course yang sama
+
+        for content in unassigned:
             course_sections = [s for s in all_sections if s.course_id == content.course_id_id]
-            if course_sections:
-                content.section = random.choice(course_sections)
-                content.order = i % 10
-                to_update.append(content)
+            if not course_sections:
+                continue
+
+            section = random.choice(course_sections)
+            key = (content.course_id_id, section.id)
+            section_order_counters[key] = section_order_counters.get(key, 0) + 1
+
+            content.section = section
+            content.order = section_order_counters[key]  # 1, 2, 3, ... per section
+            to_update.append(content)
 
         if to_update:
             CourseContent.objects.bulk_update(to_update, ['section', 'order'], batch_size=200)

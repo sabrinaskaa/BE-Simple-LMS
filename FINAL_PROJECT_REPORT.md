@@ -42,18 +42,27 @@ Untuk Paket 1 (LMS Experience), project ini mengimplementasikan fitur advanced s
 | MongoDB analytics (analytics app) | ✅ Selesai |
 | Swagger/OpenAPI docs | ✅ Selesai |
 | Redis caching + rate limiting | ✅ Selesai |
+| **Publishing Workflow (submit → review → approve/reject)** | ✅ Selesai |
+| **Course Prerequisites (validasi enrollment)** | ✅ Selesai |
 
 ---
 
 ## Fitur Tambahan yang Dipilih — Paket 1: LMS Experience
 
-| No | Fitur | Kategori | Poin | Status |
-|----|-------|----------|------|--------|
-| 1 | Search, filter, dan sorting course lanjutan | A. Course & Learning Experience | 12 | Selesai |
-| 2 | Rating, review, dan wishlist course | A. Course & Learning Experience | 12 | Selesai |
-| 3 | Curriculum dan progress belajar detail | A. Course & Learning Experience | 15 | Selesai |
-| 4 | Student dashboard | A. Course & Learning Experience | 12 | Selesai |
-| **Total** | | | **51** | |
+| No | Fitur                            |
+|----|----------------------------------|
+| 1 | Search, filter, dan sorting course lanjutan |
+| 2 | Rating, review, dan wishlist course |
+| 3 | Curriculum dan progress belajar detail |
+| 4 | Student dashboard |
+| 5 | Publishing Workflow |
+| 6 | Course Prerequisites |
+
+## Fitur Backend Tambahan (Implementasi Lanjutan)
+
+| No | Fitur | Deskripsi Singkat |
+|----|-------|-------------------|
+
 
 ---
 
@@ -313,10 +322,15 @@ GET /api/v1/dashboard/student            [Auth: Login]
 | Review tanpa enroll | 403 | `{"detail": "Harus enroll ke course ini untuk memberikan review"}` |
 | Rating di luar 1–5 | 400 | `{"detail": "Rating harus antara 1 dan 5"}` |
 | Level filter tidak valid | 400 | `{"detail": "Level tidak valid. Pilih: beginner, intermediate, advanced"}` |
-| Status filter tidak valid | 400 | `{"detail": "Status tidak valid. Pilih: draft, published, archived"}` |
+| Status filter tidak valid | 400 | `{"detail": "Status tidak valid. Pilih: draft, pending_review, published, archived"}` |
 | Wishlist duplikat | 409 | `{"detail": "Kamu sudah menambahkan course ini ke wishlist"}` |
 | Progress enrollment orang lain | 403 | `{"detail": "Anda tidak boleh mengubah progress enrollment milik user lain"}` |
 | Course tidak ditemukan | 404 | `{"detail": "Course tidak ditemukan"}` |
+| Instructor langsung set `published` | 400 | `{"detail": "Instructor tidak bisa langsung mempublikasikan course..."}` |
+| Submit review saat `pending_review` | 400 | `{"detail": "Course sudah dalam status pending_review. Tunggu keputusan admin."}` |
+| Enroll tanpa selesai prerequisite | 403 | `{"detail": "Kamu belum menyelesaikan semua prasyarat: ..."}` |
+| Prerequisite circular dependency | 400 | `{"detail": "Menambah '...' sebagai prerequisite akan membuat circular dependency"}` |
+| Prerequisite duplikat | 409 | `{"detail": "'...' sudah menjadi prerequisite course ini"}` |
 
 ---
 
@@ -435,8 +449,55 @@ Test mencakup seluruh aspek rubrik:
 
 ---
 
+## Penjelasan Implementasi Fitur Lanjutan
+
+### 5. Publishing Workflow
+
+Sebelumnya, instructor bisa langsung mengubah status course ke `published`. Fitur ini menambahkan lapisan review oleh admin sebelum course dapat dipublikasikan.
+
+**Alur:**
+```
+draft → [submit-for-review] → pending_review → [admin approve] → published
+                                                 → [admin reject + alasan] → draft
+
+published + instructor edit konten → otomatis kembali ke draft (harus review ulang)
+```
+
+**Model `CoursePublishRequest`** menyimpan riwayat setiap pengajuan beserta reviewer, alasan penolakan, dan timestamp review.
+
+**Endpoint baru:**
+- `POST /courses/{id}/submit-for-review` — Instructor ajukan publish (draft → pending_review)
+- `GET /courses/pending-review` — Admin lihat antrian review
+- `POST /courses/{id}/approve` — Admin setujui (pending_review → published)
+- `POST /courses/{id}/reject` — Admin tolak dengan alasan (pending_review → draft)
+- `GET /courses/{id}/publish-history` — Riwayat semua request untuk course ini
+
+**Guard di `update_course`:** Jika field konten (nama, deskripsi, dll.) diubah pada course `published`, status otomatis direset ke `draft`. Perubahan status saja (misal ke `archived`) tidak memicu reset ini.
+
+---
+
+### 6. Course Prerequisites
+
+Course dapat mensyaratkan penyelesaian satu atau lebih course lain sebelum student diizinkan enroll.
+
+**Model `CoursePrerequisite`** dengan `unique_together = ("course", "required_course")` mencegah duplikasi prasyarat.
+
+**Validasi saat enrollment** (`POST /enrollments`):
+1. Cek semua prerequisite course untuk course yang dituju
+2. Untuk setiap prerequisite, verifikasi apakah student sudah enroll DAN sudah menyelesaikan 100% lesson
+3. Jika belum terpenuhi, return `403 Forbidden` dengan daftar course prasyarat yang belum selesai beserta persentase progress masing-masing
+
+**Proteksi circular dependency:** Saat menambah prerequisite baru, algoritma BFS menelusuri semua prerequisite dari `required_course` untuk memastikan tidak ada loop (A → B → A).
+
+**Endpoint baru:**
+- `GET /courses/{id}/prerequisites` — Public, list semua prasyarat
+- `POST /courses/{id}/prerequisites` — Owner/Admin tambah prasyarat
+- `DELETE /courses/{id}/prerequisites/{prereq_id}` — Owner/Admin hapus prasyarat
+
+---
+
 ## Kesimpulan
 
-Project Simple LMS Extended Backend berhasil mengimplementasikan semua 4 fitur Paket 1 dengan total 51 poin. Hal yang paling dipelajari adalah pentingnya membaca kode existing sebelum mengimplementasikan fitur baru — sebagian besar infrastruktur (models, cache, permissions) sudah tersedia, sehingga fokus bisa pada gap analysis dan penyempurnaan detail.
+Project Simple LMS Extended Backend berhasil mengimplementasikan semua 4 fitur Paket 1 dengan total 51 poin, ditambah dua fitur backend lanjutan: **Publishing Workflow** (approval flow sebelum publish) dan **Course Prerequisites** (validasi prasyarat saat enrollment). Hal yang paling dipelajari adalah pentingnya membaca kode existing sebelum mengimplementasikan fitur baru — sebagian besar infrastruktur (models, cache, permissions) sudah tersedia, sehingga fokus bisa pada gap analysis dan penyempurnaan detail.
 
 Tantangan terbesar adalah memastikan konsistensi format response antara schema Pydantic dan data yang dikembalikan dari ORM, terutama untuk progress detail yang memerlukan nested structure (sections → lessons). Ke depannya, dapat ditingkatkan dengan menambahkan background task Celery untuk recalculate statistik dashboard secara berkala agar tidak bergantung sepenuhnya pada cache.

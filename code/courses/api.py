@@ -25,7 +25,8 @@ from .cache import (
 )
 from .models import (
     Category, Course, CourseMember, CourseContent, CourseReview,
-    CourseSection, LessonProgress, Wishlist,
+    CourseSection, CoursePublishRequest, CoursePrerequisite,
+    LessonProgress, Wishlist,
 )
 from .mongo import get_activity_report, get_learning_report, log_activity, log_learning_activity
 from .permissions import require_admin, require_instructor, require_student, is_admin, user_roles
@@ -55,8 +56,12 @@ from .schemas import (
     PaginatedCourseOut,
     PaginatedEnrollmentOut,
     PaginatedWishlistOut,
+    PrerequisiteIn,
+    PrerequisiteOut,
     ProgressIn,
     ProgressOut,
+    PublishRequestOut,
+    PublishReviewIn,
     RecommendedCourseOut,
     RefreshIn,
     RegisterIn,
@@ -110,6 +115,60 @@ def get_object_or_404(model, **kwargs):
         model_name = getattr(model, '__name__', 'Data')
         raise HttpError(404, f"{model_name} tidak ditemukan")
     return obj
+
+
+# ── ORDERING HELPERS ──────────────────────────────────────────────────────────
+
+def _next_section_order(course_id: int) -> int:
+    from django.db.models import Max
+    agg = CourseSection.objects.filter(course_id=course_id).aggregate(Max("order"))
+    return (agg["order__max"] or 0) + 1
+
+
+def _next_content_order(course_id: int, section_id=None) -> int:
+    from django.db.models import Max
+    qs = CourseContent.objects.filter(course_id=course_id, section_id=section_id)
+    agg = qs.aggregate(Max("order"))
+    return (agg["order__max"] or 0) + 1
+
+
+def _validate_content_order(course_id: int, section_id, order: int, exclude_id=None):
+    qs = CourseContent.objects.filter(
+        course_id=course_id, section_id=section_id, order=order
+    )
+    if exclude_id is not None:
+        qs = qs.exclude(id=exclude_id)
+    if qs.exists():
+        scope = f"section {section_id}" if section_id else "tanpa section"
+        raise HttpError(
+            409,
+            f"order={order} sudah digunakan lesson lain dalam {scope} di course ini. "
+            "Pilih order lain atau kirim tanpa field order agar otomatis ditetapkan."
+        )
+
+
+def _validate_section_order(course_id: int, order: int, exclude_id=None):
+    qs = CourseSection.objects.filter(course_id=course_id, order=order)
+    if exclude_id is not None:
+        qs = qs.exclude(id=exclude_id)
+    if qs.exists():
+        raise HttpError(
+            409,
+            f"order={order} sudah digunakan section lain dalam course ini. "
+            "Pilih order lain atau kirim tanpa field order agar otomatis ditetapkan."
+        )
+
+
+def _validate_positive_order(order):
+    """Tolak order yang bukan integer positif."""
+    if order is not None and order < 1:
+        raise HttpError(400, "order harus bernilai positif (>= 1)")
+
+
+def _validate_positive_duration(duration):
+    """Tolak duration_minutes yang negatif atau nol."""
+    if duration is not None and duration < 1:
+        raise HttpError(400, "duration_minutes harus bernilai positif (>= 1)")
 
 
 def serialize_user(user: User):
@@ -373,9 +432,20 @@ def create_course(request, data: CourseIn):
     if data.level not in allowed_levels:
         raise HttpError(400, "Level tidak valid")
 
-    allowed_statuses = {"draft", "published", "archived"}
-    if data.status not in allowed_statuses:
+    # Instructor hanya boleh membuat course dengan status draft atau archived
+    # Status published hanya bisa dicapai lewat alur review admin
+    allowed_statuses_instructor = {"draft", "archived"}
+    if data.status not in allowed_statuses_instructor | {"published"} and not is_admin(request.user):
         raise HttpError(400, "Status tidak valid")
+    if data.status == "published" and not is_admin(request.user):
+        raise HttpError(403, "Instructor tidak boleh langsung mempublikasikan course. Gunakan endpoint submit-for-review.")
+    if data.status == "pending_review":
+        raise HttpError(400, "Status pending_review tidak bisa diset secara manual")
+
+    # Default ke draft jika tidak diberikan
+    status = data.status if data.status in {"draft", "archived"} else "draft"
+    if is_admin(request.user) and data.status in {"draft", "published", "archived"}:
+        status = data.status
 
     category = None
     if data.category_id is not None:
@@ -389,7 +459,7 @@ def create_course(request, data: CourseIn):
         teacher=request.user,
         category=category,
         level=data.level,
-        status=data.status,
+        status=status,
     )
     invalidate_course_cache(course.id)
     log_activity(request.user, "create_course", {"course_id": course.id})
@@ -403,6 +473,16 @@ def update_course(request, course_id: int, data: CourseUpdateIn):
     )
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh mengedit course")
+
+    # Cek apakah ada field konten yang diubah (bukan status)
+    content_fields_changed = any([
+        data.name is not None,
+        data.description is not None,
+        data.price is not None,
+        data.image is not None,
+        data.category_id is not None,
+        data.level is not None,
+    ])
 
     if data.name is not None:
         course.name = data.name
@@ -421,11 +501,27 @@ def update_course(request, course_id: int, data: CourseUpdateIn):
         if data.level not in allowed_levels:
             raise HttpError(400, "Level tidak valid")
         course.level = data.level
+
     if data.status is not None:
-        allowed_statuses = {"draft", "published", "archived"}
-        if data.status not in allowed_statuses:
-            raise HttpError(400, "Status tidak valid")
-        course.status = data.status
+        # Admin bisa set status apapun secara langsung
+        if is_admin(request.user):
+            allowed_statuses = {"draft", "pending_review", "published", "archived"}
+            if data.status not in allowed_statuses:
+                raise HttpError(400, "Status tidak valid")
+            course.status = data.status
+        else:
+            # Instructor hanya boleh mengubah ke draft atau archived
+            # (published hanya lewat endpoint submit-for-review → approve)
+            allowed_statuses_instructor = {"draft", "archived"}
+            if data.status not in allowed_statuses_instructor:
+                raise HttpError(403, "Instructor tidak bisa langsung mengubah status ke '" + data.status + "'. "
+                                     "Gunakan endpoint submit-for-review untuk publish.")
+            course.status = data.status
+    else:
+        # Jika instructor mengedit konten sebuah course yang sudah published,
+        # status otomatis dikembalikan ke draft agar perlu review ulang
+        if content_fields_changed and course.status == "published" and not is_admin(request.user):
+            course.status = "draft"
 
     course.save()
     invalidate_course_cache(course.id)
@@ -586,7 +682,14 @@ def list_contents(request, course_id: int, page: int = 1, page_size: int = 10):
     qs = (
         CourseContent.objects
         .filter(course_id=course)
-        .order_by("id")
+        .select_related("section")
+        .order_by(
+            # Prioritas: section.order (NULL terakhir), lalu order dalam section, lalu id
+            db_models.F("section__order").asc(nulls_last=True),
+            db_models.F("section_id").asc(nulls_last=True),
+            "order",
+            "id",
+        )
     )
     total = qs.count()
     start = (page - 1) * page_size
@@ -648,6 +751,19 @@ def create_content(request, course_id: int, data: ContentIn):
     if data.section_id is not None:
         section = get_object_or_404(CourseSection, id=data.section_id, course=course)
 
+    section_id_for_scope = section.id if section else None
+
+    # Validasi positif
+    _validate_positive_order(data.order)
+    _validate_positive_duration(data.duration_minutes)
+
+    # Auto-assign order jika tidak dikirim, atau validasi jika dikirim manual
+    if data.order is None:
+        order = _next_content_order(course.id, section_id_for_scope)
+    else:
+        _validate_content_order(course.id, section_id_for_scope, data.order)
+        order = data.order
+
     content = CourseContent.objects.create(
         name=data.name,
         description=data.description,
@@ -655,7 +771,7 @@ def create_content(request, course_id: int, data: ContentIn):
         course_id=course,
         parent_id=parent,
         section=section,
-        order=data.order,
+        order=order,
         duration_minutes=data.duration_minutes,
     )
     invalidate_course_cache(course.id)
@@ -694,12 +810,22 @@ def update_content(request, course_id: int, content_id: int, data: ContentUpdate
             raise HttpError(400, "Konten tidak bisa menjadi parent dari dirinya sendiri")
         parent = get_object_or_404(CourseContent, id=data.parent_id, course_id=course)
         content.parent_id = parent
+
+    # Resolusi section baru (untuk menentukan scope order)
+    new_section_id = content.section_id  # default: scope tidak berubah
     if data.section_id is not None:
-        section = get_object_or_404(CourseSection, id=data.section_id, course=course)
-        content.section = section
+        new_section = get_object_or_404(CourseSection, id=data.section_id, course=course)
+        content.section = new_section
+        new_section_id = new_section.id
+
+    # Validasi order jika diubah
     if data.order is not None:
+        _validate_positive_order(data.order)
+        _validate_content_order(course.id, new_section_id, data.order, exclude_id=content_id)
         content.order = data.order
+
     if data.duration_minutes is not None:
+        _validate_positive_duration(data.duration_minutes)
         content.duration_minutes = data.duration_minutes
 
     content.save()
@@ -745,6 +871,33 @@ def enroll_to_course(request, data: EnrollmentIn):
     course = get_object_or_404(Course, id=data.course_id)
     if CourseMember.objects.filter(course_id=course, user_id=request.user).exists():
         raise HttpError(400, "Anda sudah terdaftar di course ini")
+
+    # Cek prerequisite: pastikan semua course prasyarat sudah diselesaikan
+    prereqs = CoursePrerequisite.objects.filter(course=course).select_related("required_course")
+    if prereqs.exists():
+        unmet = []
+        for prereq in prereqs:
+            req_course = prereq.required_course
+            # Cek apakah user sudah enroll di prerequisite course
+            member = CourseMember.objects.filter(
+                course_id=req_course, user_id=request.user
+            ).first()
+            if member is None:
+                unmet.append(f"'{req_course.name}' (belum diambil)")
+                continue
+            # Cek apakah sudah menyelesaikan semua lesson
+            total_content = CourseContent.objects.filter(course_id=req_course).count()
+            completed_content = LessonProgress.objects.filter(
+                member=member, is_completed=True
+            ).count()
+            if total_content == 0 or completed_content < total_content:
+                pct = round(completed_content / total_content * 100, 1) if total_content > 0 else 0
+                unmet.append(f"'{req_course.name}' (progress {pct}%, belum selesai)")
+        if unmet:
+            raise HttpError(
+                403,
+                "Anda harus menyelesaikan course prasyarat terlebih dahulu: " + ", ".join(unmet),
+            )
 
     member = CourseMember.objects.create(course_id=course, user_id=request.user, roles="std")
     log_activity(request.user, "enroll_course", {"course_id": course.id, "enrollment_id": member.id})
@@ -1003,10 +1156,18 @@ def create_section(request, course_id: int, data: SectionIn):
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh membuat section")
 
+    # Auto-assign order jika tidak dikirim, atau validasi jika dikirim manual
+    _validate_positive_order(data.order)
+    if data.order is None:
+        order = _next_section_order(course_id)
+    else:
+        _validate_section_order(course_id, data.order)
+        order = data.order
+
     section = CourseSection.objects.create(
         course=course,
         title=data.title,
-        order=data.order,
+        order=order,
     )
     log_activity(request.user, "create_section", {"course_id": course_id, "section_id": section.id})
     return 201, _serialize_section(section)
@@ -1024,7 +1185,11 @@ def list_sections(request, course_id: int):
 
     result = []
     for section in sections:
-        lessons = section.contents.filter(parent_id__isnull=True).order_by("order")
+        lessons = (
+            section.contents
+            .filter(parent_id__isnull=True)
+            .order_by("order", "id")
+        )
         result.append({
             "id": section.id,
             "course_id": section.course_id,
@@ -1064,6 +1229,9 @@ def update_section(request, course_id: int, section_id: int, data: SectionUpdate
     if data.title is not None:
         section.title = data.title
     if data.order is not None:
+        _validate_positive_order(data.order)
+        # Validasi: pastikan order baru tidak bentrok dengan section lain
+        _validate_section_order(course_id, data.order, exclude_id=section_id)
         section.order = data.order
     section.save()
 
@@ -1460,3 +1628,280 @@ def student_dashboard(request):
     cache_set(cache_key, response, timeout=180)
     log_activity(user, "view_student_dashboard", {})
     return response
+
+
+# =============================================================================
+# 8. PUBLISHING WORKFLOW
+# =============================================================================
+
+def _serialize_publish_request(pr: CoursePublishRequest) -> dict:
+    return {
+        "id": pr.id,
+        "course_id": pr.course_id,
+        "course_name": pr.course.name,
+        "requester_id": pr.requester_id,
+        "requester_username": pr.requester.username,
+        "status": pr.status,
+        "reviewer_id": pr.reviewer_id,
+        "reviewer_username": pr.reviewer.username if pr.reviewer else None,
+        "rejection_reason": pr.rejection_reason,
+        "requested_at": pr.requested_at,
+        "reviewed_at": pr.reviewed_at,
+    }
+
+
+@api.post(
+    "/courses/{course_id}/submit-for-review",
+    auth=api_auth,
+    response={200: PublishRequestOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Publishing Workflow"],
+    summary="Instructor mengajukan course untuk di-review admin (draft → pending_review)",
+)
+def submit_for_review(request, course_id: int):
+    course = get_object_or_404(
+        Course.objects.select_related("teacher"), id=course_id
+    )
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh mengajukan review")
+
+    if course.status == "pending_review":
+        raise HttpError(400, "Course sudah dalam status pending_review. Tunggu keputusan admin.")
+    if course.status == "published":
+        raise HttpError(400, "Course sudah dipublikasikan. Edit course terlebih dahulu jika ingin review ulang.")
+    if course.status == "archived":
+        raise HttpError(400, "Course yang diarsipkan tidak bisa diajukan untuk review. Ubah ke draft terlebih dahulu.")
+    if course.status != "draft":
+        raise HttpError(400, f"Course harus berstatus 'draft' untuk diajukan review. Status saat ini: {course.status}")
+
+    # Batalkan semua pending request lama untuk course ini (seharusnya tidak ada, tapi untuk safety)
+    CoursePublishRequest.objects.filter(course=course, status="pending").update(status="rejected")
+
+    pr = CoursePublishRequest.objects.create(
+        course=course,
+        requester=request.user,
+        status="pending",
+    )
+    course.status = "pending_review"
+    course.save(update_fields=["status"])
+    invalidate_course_cache(course.id)
+
+    log_activity(request.user, "submit_course_for_review", {"course_id": course.id, "request_id": pr.id})
+    return _serialize_publish_request(pr)
+
+
+@api.get(
+    "/courses/pending-review",
+    auth=api_auth,
+    response={200: list[PublishRequestOut], 401: ErrorOut, 403: ErrorOut},
+    tags=["Publishing Workflow"],
+    summary="Daftar semua course yang menunggu review (Admin only)",
+)
+@require_admin
+def list_pending_reviews(request):
+    prs = (
+        CoursePublishRequest.objects
+        .filter(status="pending")
+        .select_related("course", "requester", "reviewer")
+        .order_by("requested_at")
+    )
+    return [_serialize_publish_request(pr) for pr in prs]
+
+
+@api.post(
+    "/courses/{course_id}/approve",
+    auth=api_auth,
+    response={200: PublishRequestOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Publishing Workflow"],
+    summary="Admin menyetujui publish request (pending_review → published)",
+)
+@require_admin
+def approve_course(request, course_id: int):
+    course = get_object_or_404(Course, id=course_id)
+
+    if course.status != "pending_review":
+        raise HttpError(400, f"Course tidak sedang dalam status pending_review. Status saat ini: {course.status}")
+
+    pr = (
+        CoursePublishRequest.objects
+        .filter(course=course, status="pending")
+        .select_related("course", "requester", "reviewer")
+        .first()
+    )
+    if pr is None:
+        raise HttpError(404, "Tidak ada pending publish request untuk course ini")
+
+    from django.utils import timezone
+    pr.status = "approved"
+    pr.reviewer = request.user
+    pr.reviewed_at = timezone.now()
+    pr.save()
+
+    course.status = "published"
+    course.save(update_fields=["status"])
+    invalidate_course_cache(course.id)
+
+    log_activity(request.user, "approve_course", {"course_id": course.id, "request_id": pr.id})
+    return _serialize_publish_request(pr)
+
+
+@api.post(
+    "/courses/{course_id}/reject",
+    auth=api_auth,
+    response={200: PublishRequestOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Publishing Workflow"],
+    summary="Admin menolak publish request (pending_review → draft)",
+)
+@require_admin
+def reject_course(request, course_id: int, data: PublishReviewIn):
+    course = get_object_or_404(Course, id=course_id)
+
+    if course.status != "pending_review":
+        raise HttpError(400, f"Course tidak sedang dalam status pending_review. Status saat ini: {course.status}")
+
+    pr = (
+        CoursePublishRequest.objects
+        .filter(course=course, status="pending")
+        .select_related("course", "requester", "reviewer")
+        .first()
+    )
+    if pr is None:
+        raise HttpError(404, "Tidak ada pending publish request untuk course ini")
+
+    from django.utils import timezone
+    pr.status = "rejected"
+    pr.reviewer = request.user
+    pr.rejection_reason = data.reason
+    pr.reviewed_at = timezone.now()
+    pr.save()
+
+    course.status = "draft"
+    course.save(update_fields=["status"])
+    invalidate_course_cache(course.id)
+
+    log_activity(request.user, "reject_course", {"course_id": course.id, "request_id": pr.id, "reason": data.reason})
+    return _serialize_publish_request(pr)
+
+
+@api.get(
+    "/courses/{course_id}/publish-history",
+    auth=api_auth,
+    response={200: list[PublishRequestOut], 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Publishing Workflow"],
+    summary="Riwayat semua publish request untuk sebuah course (Owner/Admin)",
+)
+def course_publish_history(request, course_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang bisa melihat riwayat publish")
+
+    prs = (
+        CoursePublishRequest.objects
+        .filter(course=course)
+        .select_related("course", "requester", "reviewer")
+        .order_by("-requested_at")
+    )
+    return [_serialize_publish_request(pr) for pr in prs]
+
+
+# =============================================================================
+# 9. COURSE PREREQUISITES
+# =============================================================================
+
+def _serialize_prerequisite(prereq: CoursePrerequisite) -> dict:
+    return {
+        "id": prereq.id,
+        "course_id": prereq.course_id,
+        "required_course_id": prereq.required_course_id,
+        "required_course_name": prereq.required_course.name,
+        "created_at": prereq.created_at,
+    }
+
+
+def _has_circular_dependency(course_id: int, required_course_id: int) -> bool:
+    """Check apakah menambah required_course_id sebagai prerequisite course_id akan membuat circular dependency."""
+    # BFS/DFS: cari apakah course_id sudah merupakan (langsung/tidak langsung) prerequisite dari required_course_id
+    visited = set()
+    queue = [required_course_id]
+    while queue:
+        current = queue.pop(0)
+        if current == course_id:
+            return True  # Circular!
+        if current in visited:
+            continue
+        visited.add(current)
+        # Cari semua prerequisite dari current
+        prereq_ids = list(
+            CoursePrerequisite.objects.filter(course_id=current).values_list("required_course_id", flat=True)
+        )
+        queue.extend(prereq_ids)
+    return False
+
+
+@api.get(
+    "/courses/{course_id}/prerequisites",
+    response={200: list[PrerequisiteOut], 404: ErrorOut},
+    tags=["Prerequisites"],
+    summary="List semua prerequisite untuk sebuah course (Public)",
+)
+def list_prerequisites(request, course_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    prereqs = (
+        CoursePrerequisite.objects
+        .filter(course=course)
+        .select_related("required_course")
+        .order_by("created_at")
+    )
+    return [_serialize_prerequisite(p) for p in prereqs]
+
+
+@api.post(
+    "/courses/{course_id}/prerequisites",
+    auth=api_auth,
+    response={201: PrerequisiteOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    tags=["Prerequisites"],
+    summary="Tambah prerequisite ke course (Owner/Admin)",
+)
+def add_prerequisite(request, course_id: int, data: PrerequisiteIn):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh menambah prerequisite")
+
+    if data.required_course_id == course_id:
+        raise HttpError(400, "Course tidak bisa menjadi prerequisite untuk dirinya sendiri")
+
+    required_course = get_object_or_404(Course, id=data.required_course_id)
+
+    # Cek duplikat
+    if CoursePrerequisite.objects.filter(course=course, required_course=required_course).exists():
+        raise HttpError(409, f"'{required_course.name}' sudah menjadi prerequisite course ini")
+
+    # Cek circular dependency
+    if _has_circular_dependency(course_id, data.required_course_id):
+        raise HttpError(
+            400,
+            f"Menambah '{required_course.name}' sebagai prerequisite akan membuat circular dependency"
+        )
+
+    prereq = CoursePrerequisite.objects.create(course=course, required_course=required_course)
+    log_activity(request.user, "add_prerequisite", {"course_id": course_id, "required_course_id": data.required_course_id})
+    return 201, _serialize_prerequisite(prereq)
+
+
+@api.delete(
+    "/courses/{course_id}/prerequisites/{prereq_id}",
+    auth=api_auth,
+    response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Prerequisites"],
+    summary="Hapus prerequisite dari course (Owner/Admin)",
+)
+def remove_prerequisite(request, course_id: int, prereq_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh menghapus prerequisite")
+
+    prereq = get_object_or_404(CoursePrerequisite, id=prereq_id, course=course)
+    name = prereq.required_course.name
+    prereq.delete()
+    log_activity(request.user, "remove_prerequisite", {"course_id": course_id, "prereq_id": prereq_id})
+    return {"message": f"Prerequisite '{name}' berhasil dihapus"}
+

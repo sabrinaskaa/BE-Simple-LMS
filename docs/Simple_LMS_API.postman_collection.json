@@ -1,8 +1,8 @@
 {
   "info": {
     "_postman_id": "simple-lms-api-collection-v2",
-    "name": "Simple LMS API — Paket 1 Complete",
-    "description": "REST API Simple LMS Extended — Paket 1: LMS Experience.\n\n**Base URL**: `{{base_url}}`\n\n## Fitur yang Dicakup\n- 🔐 Authentication (Register, Login, Refresh, Profile)\n- 📚 Courses — Public (Search, Filter, Sort, Detail)\n- 🔒 Courses — Protected (Create, Update, Delete)\n- ⭐ Reviews (Buat/Update Review, Hapus, Rating Avg)\n- ❤️ Wishlist (Tambah, Hapus, List)\n- 📋 Sections (CRUD Kurikulum per Course)\n- 📋 Enrollments (Enroll, My Courses)\n- 📈 Progress Belajar (Mark Selesai, Progress Detail per Section)\n- 🏠 Student Dashboard (Active/Completed Courses, Recommendations, Cache)\n- ⚙️ Async Tasks (Export Report, Task Status)\n- 📁 File Upload/Download\n- 📊 Analytics (MongoDB)\n- 🧪 Performance Lab\n\n## Setup\n1. Import collection ini ke Postman\n2. Set `base_url` ke `http://localhost:8000/api/v1`\n3. Jalankan **Login** → token otomatis tersimpan ke `access_token`\n\n## Variabel Penting\n- `base_url` — Base URL API\n- `access_token` — JWT token (auto-save setelah Login)\n- `course_id` — ID course (update sesuai data)\n- `enrollment_id` — ID enrollment (update sesuai data)\n- `section_id` — ID section (update sesuai data)\n- `review_id` — ID review untuk delete\n- `content_id` — ID content/lesson",
+    "name": "Simple LMS API — Complete (Paket 1 + Publishing + Prerequisites)",
+    "description": "REST API Simple LMS Extended — Paket 1: LMS Experience + Publishing Workflow + Course Prerequisites.\n\n**Base URL**: `{{base_url}}`\n\n## Fitur yang Dicakup\n- 🔐 Authentication (Register, Login, Refresh, Profile)\n- 📚 Courses — Public (Search, Filter, Sort, Detail)\n- 🔒 Courses — Protected (Create, Update, Delete)\n- ⭐ Reviews (Buat/Update Review, Hapus, Rating Avg)\n- ❤️ Wishlist (Tambah, Hapus, List)\n- 📋 Sections (CRUD Kurikulum per Course)\n- 📋 Enrollments (Enroll, My Courses)\n- 📈 Progress Belajar (Mark Selesai, Progress Detail per Section)\n- 🏠 Student Dashboard\n- ⚙️ Async Tasks (Export Report, Task Status)\n- 📁 File Upload/Download\n- 📊 Analytics (MongoDB)\n- 🚀 **Publishing Workflow** (Submit for Review, Admin Approve/Reject, History)\n- 🔗 **Course Prerequisites** (List, Add, Remove)\n- 🧪 Performance Lab\n\n## Setup\n1. Import collection ini ke Postman\n2. Set `base_url` ke `http://localhost:8000/api/v1`\n3. Jalankan **Login** → token otomatis tersimpan ke `access_token`\n\n## Variabel Penting\n- `base_url` — Base URL API\n- `access_token` — JWT token (auto-save setelah Login)\n- `course_id` — ID course (update sesuai data)\n- `enrollment_id` — ID enrollment (update sesuai data)\n- `section_id` — ID section (update sesuai data)\n- `review_id` — ID review untuk delete\n- `content_id` — ID content/lesson\n- `prereq_id` — ID prerequisite untuk delete",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -59,6 +59,12 @@
       "value": "",
       "type": "string",
       "description": "Celery Task ID — diisi otomatis setelah trigger async task."
+    },
+    {
+      "key": "prereq_id",
+      "value": "1",
+      "type": "string",
+      "description": "ID prerequisite untuk delete."
     }
   ],
   "item": [
@@ -1462,6 +1468,310 @@
             },
             "description": "✅ **Optimized**: Menggunakan `Course.objects.all().update(price=F('price') * 1.1)` — 1 query."
           }
+        }
+      ]
+    },
+    {
+      "name": "🚀 Publishing Workflow",
+      "description": "Alur review dan persetujuan publish course.\n\nAlur: `draft` → Submit For Review → `pending_review` → Admin Approve → `published`\n\nJika admin menolak, course kembali ke `draft`. Jika instructor mengedit course yang sudah `published`, status otomatis kembali ke `draft`.",
+      "item": [
+        {
+          "name": "Submit For Review (Instructor/Owner)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/submit-for-review",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "{{course_id}}", "submit-for-review"]
+            },
+            "description": "Instructor mengajukan course untuk direview admin. Course harus berstatus `draft`.\n\n**Response 200**: Data publish request yang dibuat.\n**Response 400**: Course tidak dalam status draft (sudah pending/published).\n**Response 403**: Bukan owner course atau admin."
+          },
+          "response": [
+            {
+              "name": "200 - Submitted",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 1,\n  \"course_id\": 1,\n  \"course_name\": \"Pemrograman Python Dasar\",\n  \"requester_id\": 3,\n  \"requester_username\": \"dosen01\",\n  \"status\": \"pending\",\n  \"reviewer_id\": null,\n  \"reviewer_username\": null,\n  \"rejection_reason\": \"\",\n  \"requested_at\": \"2025-06-30T06:00:00Z\",\n  \"reviewed_at\": null\n}"
+            },
+            {
+              "name": "400 - Course Sudah Pending/Published",
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "body": "{\"detail\": \"Course sudah dalam status pending_review. Tunggu keputusan admin.\"}"
+            },
+            {
+              "name": "403 - Bukan Owner/Admin",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\"detail\": \"Hanya owner course atau admin yang boleh mengajukan review\"}"
+            }
+          ]
+        },
+        {
+          "name": "List Pending Reviews (Admin Only)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/pending-review",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "pending-review"]
+            },
+            "description": "Mendapatkan semua course yang sedang menunggu review. **Admin only.**\n\n**Response 200**: List publish request dengan status pending, diurutkan dari yang paling lama menunggu."
+          },
+          "response": [
+            {
+              "name": "200 - Daftar Pending",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "[\n  {\n    \"id\": 1,\n    \"course_id\": 1,\n    \"course_name\": \"Pemrograman Python Dasar\",\n    \"requester_username\": \"dosen01\",\n    \"status\": \"pending\",\n    \"requested_at\": \"2025-06-30T06:00:00Z\"\n  }\n]"
+            },
+            {
+              "name": "403 - Bukan Admin",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\"detail\": \"Hanya admin yang boleh mengakses endpoint ini\"}"
+            }
+          ]
+        },
+        {
+          "name": "Approve Course (Admin Only)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/approve",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "{{course_id}}", "approve"]
+            },
+            "description": "Admin menyetujui publish request. Course berubah dari `pending_review` ke `published`. **Admin only.**\n\n**Response 200**: Data publish request dengan status approved.\n**Response 400**: Course tidak dalam status pending_review.\n**Response 404**: Tidak ada pending request untuk course ini."
+          },
+          "response": [
+            {
+              "name": "200 - Approved",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 1,\n  \"course_id\": 1,\n  \"course_name\": \"Pemrograman Python Dasar\",\n  \"status\": \"approved\",\n  \"reviewer_username\": \"admin\",\n  \"reviewed_at\": \"2025-06-30T07:00:00Z\"\n}"
+            },
+            {
+              "name": "400 - Bukan Pending Review",
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "body": "{\"detail\": \"Course tidak sedang dalam status pending_review. Status saat ini: draft\"}"
+            }
+          ]
+        },
+        {
+          "name": "Reject Course (Admin Only)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Deskripsi course kurang lengkap, mohon perbaiki terlebih dahulu.\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/reject",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "{{course_id}}", "reject"]
+            },
+            "description": "Admin menolak publish request. Course kembali ke `draft`. Alasan penolakan disimpan. **Admin only.**\n\n**Body**: `reason` (string, opsional) — alasan penolakan\n**Response 200**: Data publish request dengan status rejected + alasan."
+          },
+          "response": [
+            {
+              "name": "200 - Rejected",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 1,\n  \"course_id\": 1,\n  \"status\": \"rejected\",\n  \"reviewer_username\": \"admin\",\n  \"rejection_reason\": \"Deskripsi course kurang lengkap, mohon perbaiki terlebih dahulu.\",\n  \"reviewed_at\": \"2025-06-30T07:05:00Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Publish History (Owner/Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/publish-history",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "{{course_id}}", "publish-history"]
+            },
+            "description": "Mendapatkan riwayat semua publish request untuk sebuah course, diurutkan dari yang terbaru. Hanya **owner course** atau **Admin**.\n\n**Response 200**: List semua publish request (pending, approved, rejected)."
+          },
+          "response": [
+            {
+              "name": "200 - Riwayat",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "[\n  {\n    \"id\": 2,\n    \"status\": \"approved\",\n    \"requester_username\": \"dosen01\",\n    \"reviewer_username\": \"admin\",\n    \"requested_at\": \"2025-06-30T06:00:00Z\",\n    \"reviewed_at\": \"2025-06-30T07:00:00Z\"\n  },\n  {\n    \"id\": 1,\n    \"status\": \"rejected\",\n    \"requester_username\": \"dosen01\",\n    \"reviewer_username\": \"admin\",\n    \"rejection_reason\": \"Deskripsi kurang lengkap\",\n    \"requested_at\": \"2025-06-29T08:00:00Z\",\n    \"reviewed_at\": \"2025-06-29T09:00:00Z\"\n  }\n]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🔗 Course Prerequisites",
+      "description": "Manajemen prasyarat (prerequisite) course.\n\nStudent yang belum menyelesaikan semua course prasyarat (100% lesson) akan ditolak saat mencoba enroll. Sistem juga mencegah circular dependency (A membutuhkan B yang membutuhkan A).",
+      "item": [
+        {
+          "name": "List Prerequisites (Public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/prerequisites",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "{{course_id}}", "prerequisites"]
+            },
+            "description": "Mendapatkan daftar semua course prasyarat untuk sebuah course. **Endpoint publik — tidak perlu autentikasi.**\n\n**Response 200**: List prerequisite dengan nama course yang disyaratkan.\n**Response 404**: Course tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "200 - Daftar Prerequisites",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "[\n  {\n    \"id\": 1,\n    \"course_id\": 5,\n    \"required_course_id\": 1,\n    \"required_course_name\": \"Pemrograman Python Dasar\",\n    \"created_at\": \"2025-06-30T06:00:00Z\"\n  }\n]"
+            },
+            {
+              "name": "200 - Kosong (tidak ada prerequisite)",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "[]"
+            }
+          ]
+        },
+        {
+          "name": "Tambah Prerequisite (Owner/Admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const json = pm.response.json();",
+                  "    pm.collectionVariables.set('prereq_id', json.id);",
+                  "    console.log('\u2705 Prereq ID tersimpan:', json.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"required_course_id\": 1\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/prerequisites",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "{{course_id}}", "prerequisites"]
+            },
+            "description": "Menambahkan prerequisite ke course. Hanya **owner course** atau **Admin**.\n\n- `required_course_id` (required): ID course yang menjadi prasyarat\n- Sistem mencegah **self-referencing** (course tidak bisa jadi prasyarat dirinya sendiri)\n- Sistem mencegah **circular dependency** menggunakan BFS\n- Tidak bisa menambahkan prasyarat yang sudah ada (**409 Conflict**)\n\nPrereq ID otomatis tersimpan ke variabel `prereq_id` via test script.\n\n**Response 201**: Data prerequisite yang dibuat.\n**Response 400**: Circular dependency atau self-referencing.\n**Response 409**: Prerequisite sudah ada."
+          },
+          "response": [
+            {
+              "name": "201 - Prerequisite Ditambahkan",
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"id\": 1,\n  \"course_id\": 5,\n  \"required_course_id\": 1,\n  \"required_course_name\": \"Pemrograman Python Dasar\",\n  \"created_at\": \"2025-06-30T06:00:00Z\"\n}"
+            },
+            {
+              "name": "400 - Circular Dependency",
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "body": "{\"detail\": \"Menambah 'Pemrograman Python Dasar' sebagai prerequisite akan membuat circular dependency\"}"
+            },
+            {
+              "name": "409 - Sudah Ada",
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "body": "{\"detail\": \"'Pemrograman Python Dasar' sudah menjadi prerequisite course ini\"}"
+            },
+            {
+              "name": "403 - Enroll Ditolak (Prerequisite Belum Selesai)",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\"detail\": \"Kamu belum menyelesaikan semua prasyarat: Pemrograman Python Dasar (60.0% selesai)\"}"
+            }
+          ]
+        },
+        {
+          "name": "Hapus Prerequisite (Owner/Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+            },
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/courses/{{course_id}}/prerequisites/{{prereq_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["courses", "{{course_id}}", "prerequisites", "{{prereq_id}}"]
+            },
+            "description": "Menghapus prerequisite dari course berdasarkan ID prerequisite. Hanya **owner course** atau **Admin**.\n\n**Path params**: `course_id`, `prereq_id` (ID dari tabel CoursePrerequisite, bukan course_id)\n\n**Response 200**: Pesan konfirmasi.\n**Response 404**: Prerequisite tidak ditemukan."
+          },
+          "response": [
+            {
+              "name": "200 - Dihapus",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\"message\": \"Prerequisite 'Pemrograman Python Dasar' berhasil dihapus\"}"
+            },
+            {
+              "name": "404 - Tidak Ditemukan",
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "body": "{\"detail\": \"Not Found\"}"
+            }
+          ]
         }
       ]
     }

@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.conf import settings
 from django.conf.urls.static import static
 from django.urls import path, include
+from django.views.generic import RedirectView
 
 from courses.api import api
 
@@ -11,6 +12,9 @@ from analytics.api import analytics_router
 api.add_router("/analytics/", analytics_router)
 
 urlpatterns = [
+    # Redirect root ke Swagger docs agar tidak 404
+    path('', RedirectView.as_view(url='/api/v1/docs', permanent=False)),
+
     path('admin/', admin.site.urls),
     # path('silk/', include('silk.urls', namespace='silk')),
 

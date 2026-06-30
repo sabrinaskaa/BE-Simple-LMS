@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "corsheaders",
     # "silk",       # Django Silk - query profiling (Modul 05)
     "courses",    # Aplikasi Simple LMS kita
     "analytics",  # Analytics MongoDB - activity & request logs (Modul 11)
@@ -42,6 +43,7 @@ INSTALLED_APPS = [
 # =============================================================================
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     # "silk.middleware.SilkyMiddleware",  # Silk harus di posisi awal (setelah Security)
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -235,3 +237,5 @@ CELERY_BEAT_SCHEDULE = {
         'args': (),
     },
 }
+
+CORS_ALLOW_ALL_ORIGINS = True  # Izinkan semua frontend (Vercel) untuk mengakses API

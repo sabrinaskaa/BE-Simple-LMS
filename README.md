@@ -1,4 +1,4 @@
-# Simple LMS — Backend API (MongoDB Analytics Enabled)
+# Simple LMS — Backend API (MongoDB Analytics + Publishing Workflow + Prerequisites)
 
 REST API untuk sistem Learning Management System (LMS) sederhana, dibangun dengan **Django 5**, **Django Ninja**, **PostgreSQL**, **Redis**, **MongoDB**, **Celery**, dan **RabbitMQ**.
 
@@ -197,7 +197,7 @@ Semua endpoint berada di bawah prefix `/api/v1/`.
 - `category_id` — filter berdasarkan ID kategori
 - `instructor_id` — filter berdasarkan ID instructor
 - `level` — filter level (`beginner`, `intermediate`, `advanced`)
-- `status` — filter status (`draft`, `published`, `archived`)
+- `status` — filter status (`draft`, `pending_review`, `published`, `archived`)
 - `min_price` / `max_price` — filter harga
 - `ordering` — urutan (`name`, `-name`, `price`, `-price`, `created_at`, `-created_at`, `rating_avg`, `-rating_avg`)
 - `page` / `page_size` — pagination
@@ -243,16 +243,43 @@ Semua endpoint berada di bawah prefix `/api/v1/`.
 
 | Method | Endpoint | Auth | Role | Deskripsi |
 |---|---|---|---|---|
-| `POST` | `/enrollments` | ✅ | Student | Enroll ke sebuah course |
+| `POST` | `/enrollments` | ✅ | Student | Enroll ke sebuah course (validasi prerequisite otomatis) |
 | `GET` | `/enrollments/my-courses` | ✅ | Student | Lihat semua course yang diikuti |
 | `POST` | `/enrollments/{id}/progress` | ✅ | Student | Tandai lesson sebagai selesai |
 | `GET` | `/enrollments/{id}/progress` | ✅ | Student/Admin | Progress detail per section + persentase |
+
+> Enrollment ditolak `403` jika student belum menyelesaikan course prerequisite (100% lesson progress).
 
 ### 📊 Student Dashboard
 
 | Method | Endpoint | Auth | Role | Deskripsi |
 |---|---|---|---|---|
 | `GET` | `/dashboard/student` | ✅ | Login | Dashboard student: course aktif, selesai, wishlist, rekomendasi |
+
+### 🚀 Publishing Workflow
+
+Course baru dibuat dengan status `draft`. Alur publish:
+`draft` → **Ajukan Review** → `pending_review` → **Admin Approve** → `published`
+
+Jika instructor mengedit konten course yang sudah `published`, status otomatis kembali ke `draft` untuk review ulang.
+
+| Method | Endpoint | Auth | Role | Deskripsi |
+|---|---|---|---|---|
+| `POST` | `/courses/{id}/submit-for-review` | ✅ | Owner/Admin | Ajukan course untuk direview (draft → pending_review) |
+| `GET` | `/courses/pending-review` | ✅ | Admin | Daftar semua course yang menunggu review |
+| `POST` | `/courses/{id}/approve` | ✅ | Admin | Setujui publish request (pending_review → published) |
+| `POST` | `/courses/{id}/reject` | ✅ | Admin | Tolak publish request + alasan (pending_review → draft) |
+| `GET` | `/courses/{id}/publish-history` | ✅ | Owner/Admin | Riwayat semua publish request untuk course ini |
+
+### 🔗 Course Prerequisites
+
+Course dapat mensyaratkan penyelesaian course lain. Enrollment otomatis ditolak jika prerequisite belum selesai (100%).
+
+| Method | Endpoint | Auth | Role | Deskripsi |
+|---|---|---|---|---|
+| `GET` | `/courses/{id}/prerequisites` | ❌ | Semua | List semua prerequisite untuk course ini |
+| `POST` | `/courses/{id}/prerequisites` | ✅ | Owner/Admin | Tambah prerequisite ke course |
+| `DELETE` | `/courses/{id}/prerequisites/{prereq_id}` | ✅ | Owner/Admin | Hapus prerequisite dari course |
 
 ### 📎 File Upload / Download
 
