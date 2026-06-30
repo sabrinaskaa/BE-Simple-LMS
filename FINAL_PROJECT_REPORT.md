@@ -44,6 +44,7 @@ Untuk Paket 1 (LMS Experience), project ini mengimplementasikan fitur advanced s
 | Redis caching + rate limiting | ✅ Selesai |
 | **Publishing Workflow (submit → review → approve/reject)** | ✅ Selesai |
 | **Course Prerequisites (validasi enrollment)** | ✅ Selesai |
+| **Student Chatbot Assistant (Gemini LLM)** | ✅ Selesai |
 
 ---
 
@@ -62,6 +63,7 @@ Untuk Paket 1 (LMS Experience), project ini mengimplementasikan fitur advanced s
 
 | No | Fitur | Deskripsi Singkat |
 |----|-------|-------------------|
+| 1 | Student Chatbot Assistant (Gemini LLM) | AI Chatbot interaktif terintegrasi Google Gemini API (`gemini-flash-latest`) untuk menjawab pertanyaan siswa dan merekomendasikan kursus berdasarkan database sistem. |
 
 
 ---
@@ -313,6 +315,12 @@ GET  /api/v1/enrollments/{id}/progress   [Auth: Student/Admin]
 GET /api/v1/dashboard/student            [Auth: Login]
 ```
 
+### Fitur 7 — Student Chatbot Assistant (Gemini LLM)
+```
+POST /api/v1/chatbot                     [Auth: Student]
+Body: {"message": "Rekomendasikan saya kelas python"}
+```
+
 ---
 
 ## Error Cases yang Dihandle
@@ -331,6 +339,8 @@ GET /api/v1/dashboard/student            [Auth: Login]
 | Enroll tanpa selesai prerequisite | 403 | `{"detail": "Kamu belum menyelesaikan semua prasyarat: ..."}` |
 | Prerequisite circular dependency | 400 | `{"detail": "Menambah '...' sebagai prerequisite akan membuat circular dependency"}` |
 | Prerequisite duplikat | 409 | `{"detail": "'...' sudah menjadi prerequisite course ini"}` |
+| Chatbot pesan kosong | 400 | `{"detail": "Pesan tidak boleh kosong"}` |
+| Chatbot diakses non-student | 403 | `{"detail": "Hanya student yang boleh mengakses endpoint ini"}` |
 
 ---
 
@@ -493,6 +503,21 @@ Course dapat mensyaratkan penyelesaian satu atau lebih course lain sebelum stude
 - `GET /courses/{id}/prerequisites` — Public, list semua prasyarat
 - `POST /courses/{id}/prerequisites` — Owner/Admin tambah prasyarat
 - `DELETE /courses/{id}/prerequisites/{prereq_id}` — Owner/Admin hapus prasyarat
+
+---
+
+### 7. Student Chatbot Assistant (Gemini LLM)
+
+Fitur ini mengintegrasikan asisten AI interaktif ke dalam dashboard mahasiswa yang ditenagai oleh **Google Gemini API** (`gemini-flash-latest`).
+
+**Fitur Utama:**
+- **Konteks Kursus**: Chatbot membaca daftar kursus berstatus `published` dari database PostgreSQL secara dinamis dan menggunakannya sebagai konteks pembelajaran.
+- **Rekomendasi Cerdas**: Mahasiswa dapat meminta saran kursus (misalnya: "rekomendasikan kelas pemula"), dan AI akan memilihkan kursus yang paling sesuai beserta alasan kecocokannya.
+- **Tanya Jawab Umum**: Chatbot dapat menjawab pertanyaan umum seputar pemrograman atau materi belajar yang ditanyakan mahasiswa.
+- **Offline Fallback (Demo Mode)**: Jika kunci API (`GEMINI_API_KEY`) belum dikonfigurasi di file `.env`, sistem akan otomatis melakukan pencarian kata kunci sederhana pada database lokal dan menampilkan kursus yang relevan, sehingga fungsionalitas tetap berjalan.
+
+**Endpoint baru:**
+- `POST /chatbot` — Mengirimkan pesan mahasiswa ke asisten AI (hanya diakses oleh user ber-role **Student**).
 
 ---
 

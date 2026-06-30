@@ -1774,6 +1774,61 @@
           ]
         }
       ]
+    },
+    {
+      "name": "🤖 Chatbot Assistant",
+      "description": "AI Chatbot Assistant for students. Powered by Gemini API (gemini-flash-latest) to recommend courses and answer learning questions.",
+      "item": [
+        {
+          "name": "Kirim Pesan ke Chatbot",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                { "key": "token", "value": "{{access_token}}", "type": "string" }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Rekomendasikan saya kursus pemrograman python\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/chatbot",
+              "host": ["{{base_url}}"],
+              "path": ["chatbot"]
+            },
+            "description": "Mengirimkan pesan ke chatbot asisten AI. Hanya bisa diakses oleh **Student**.\n\nJika `GEMINI_API_KEY` terkonfigurasi, AI akan merekomendasikan kursus berdasarkan konteks kursus terpublikasi saat ini.\nJika tidak, chatbot akan berjalan dalam **Demo Mode** menggunakan pencarian kata kunci database lokal.\n\n**Response 200**: Tanggapan teks dari chatbot."
+          },
+          "response": [
+            {
+              "name": "200 - Tanggapan Chatbot",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"response\": \"Halo! Tentu saja, di platform Simple LMS kami memiliki beberapa kelas pemrograman Python yang sangat direkomendasikan...\"\n}"
+            },
+            {
+              "name": "400 - Pesan Kosong",
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Pesan tidak boleh kosong\"\n}"
+            },
+            {
+              "name": "403 - Bukan Student",
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"detail\": \"Hanya student yang boleh mengakses endpoint ini\"\n}"
+            }
+          ]
+        }
+      ]
     }
   ]
 }

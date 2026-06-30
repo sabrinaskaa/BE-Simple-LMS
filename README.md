@@ -31,6 +31,7 @@ Proyek ini menerapkan arsitektur **polyglot persistence**:
 | Message Broker | RabbitMQ 3 | Broker pesan untuk Celery |
 | Task Queue | Celery 5 | Ekspor laporan async & generate sertifikat |
 | Analytics & Logs | MongoDB 7 | Activity logs & auto HTTP request logs |
+| AI Integration | Google Gemini API | Model `gemini-flash-latest` untuk Chatbot Asisten Mahasiswa |
 | Auth | JWT (PyJWT) | Autentikasi berbasis token stateless |
 | Containerisasi | Docker + Docker Compose | Standarisasi deployment environment |
 
@@ -304,6 +305,14 @@ Course dapat mensyaratkan penyelesaian course lain. Enrollment otomatis ditolak 
 |---|---|---|---|---|
 | `GET` | `/reports/activity` | ✅ | Admin | Laporan aktivitas user dari MongoDB (`lms_logs`) |
 | `GET` | `/reports/learning` | ✅ | Admin | Laporan aktivitas belajar dari MongoDB (`lms_logs`) |
+
+### 🤖 Chatbot Assistant (Gemini LLM)
+
+| Method | Endpoint | Auth | Role | Deskripsi |
+|---|---|---|---|---|
+| `POST` | `/chatbot` | ✅ | Student | Kirim pesan ke asisten AI untuk rekomendasi kursus dan tanya jawab |
+
+> Chatbot terintegrasi dengan **Google Gemini API** (`gemini-flash-latest`). Jika kunci API (`GEMINI_API_KEY`) belum terpasang di file `.env`, chatbot otomatis berjalan dalam **Demo Mode** (menggunakan pencarian kata kunci sederhana dari database lokal).
 
 ### 📈 Analytics (MongoDB lms_analytics — NEW Chapter 11)
 
