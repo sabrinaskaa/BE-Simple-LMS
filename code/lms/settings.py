@@ -19,6 +19,13 @@ if DEBUG:
 else:
     ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 
+# CSRF Trusted Origins untuk mengatasi masalah CSRF Verification Failed saat diakses lewat proxy/tunnel (seperti ngrok)
+CSRF_TRUSTED_ORIGINS = os.environ.get(
+    "CSRF_TRUSTED_ORIGINS",
+    "http://localhost:8000,http://127.0.0.1:8000,https://localhost:8000,https://127.0.0.1:8000"
+).split(",")
+
+
 
 # =============================================================================
 # Aplikasi yang terdaftar

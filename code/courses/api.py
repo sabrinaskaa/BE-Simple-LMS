@@ -81,6 +81,8 @@ from .schemas import (
     WishlistDashboardOut,
     WishlistIn,
     WishlistOut,
+    ChatbotIn,
+    ChatbotOut,
 )
 from .tasks import (
     export_course_report,
@@ -1904,4 +1906,137 @@ def remove_prerequisite(request, course_id: int, prereq_id: int):
     prereq.delete()
     log_activity(request.user, "remove_prerequisite", {"course_id": course_id, "prereq_id": prereq_id})
     return {"message": f"Prerequisite '{name}' berhasil dihapus"}
+
+
+# =============================================================================
+# 10. CHATBOT ASSISTANT
+# =============================================================================
+
+@api.post(
+    "/chatbot",
+    auth=api_auth,
+    response={200: ChatbotOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut},
+    tags=["Chatbot"],
+    summary="AI Chatbot Assistant for Students",
+)
+@require_student
+def chatbot_assistant(request, data: ChatbotIn):
+    import json
+    import urllib.request
+    import urllib.error
+    
+    user_message = data.message.strip()
+    if not user_message:
+        raise HttpError(400, "Pesan tidak boleh kosong")
+    
+    # 1. Dapatkan daftar kursus yang aktif/published untuk context
+    courses = Course.objects.filter(status="published").select_related("teacher", "category")
+    course_list = []
+    for c in courses:
+        cat_name = c.category.name if c.category else "Tanpa Kategori"
+        teacher_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
+        course_list.append(
+            f"- {c.name} (Level: {c.level}) - Kategori: {cat_name} - Harga: Rp {c.price} - Instruktur: {teacher_name}. Deskripsi: {c.description}"
+        )
+    courses_context = "\n".join(course_list)
+    
+    # 2. Cek apakah GEMINI_API_KEY ada di environment
+    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+    
+    if not gemini_api_key:
+        # Fallback offline: Lakukan pencarian kata kunci sederhana dari database
+        matching_courses = []
+        words = user_message.lower().split()
+        for word in words:
+            if len(word) > 2:  # cari kata kunci yang cukup panjang
+                # cari course yang memiliki kecocokan nama atau deskripsi
+                matched = Course.objects.filter(
+                    Q(name__icontains=word) | Q(description__icontains=word),
+                    status="published"
+                ).select_related("teacher")
+                matching_courses.extend(matched)
+        
+        # Remove duplicates
+        unique_matches = []
+        seen_ids = set()
+        for c in matching_courses:
+            if c.id not in seen_ids:
+                seen_ids.add(c.id)
+                unique_matches.append(c)
+                
+        if unique_matches:
+            recs = []
+            for c in unique_matches[:3]:
+                t_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
+                recs.append(f"- **{c.name}** (Level: {c.level}, Harga: Rp {c.price}) oleh {t_name}")
+            course_recommendations = "\n".join(recs)
+            
+            response_text = (
+                "[Demo Mode - GEMINI_API_KEY belum dikonfigurasi di file .env]\n\n"
+                f"Halo! Saya mendeteksi Anda mencari kursus terkait. Berikut beberapa rekomendasi dari database kami:\n\n"
+                f"{course_recommendations}\n\n"
+                "Untuk mengaktifkan asisten AI pintar Gemini, silakan konfigurasikan kunci API `GEMINI_API_KEY` di file `.env` backend Anda."
+            )
+        else:
+            response_text = (
+                "[Demo Mode - GEMINI_API_KEY belum dikonfigurasi di file .env]\n\n"
+                "Halo! Saya adalah asisten virtual Simple LMS. Untuk saat ini, kunci API Gemini belum dikonfigurasi. "
+                "Namun, Anda dapat melihat daftar kursus secara lengkap di halaman utama (Dashboard/Course) atau "
+                "mengonfigurasikan `GEMINI_API_KEY` pada file `.env` di backend untuk mengaktifkan AI."
+            )
+        return {"response": response_text}
+        
+    # 3. Request ke Gemini API
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={gemini_api_key}"
+    
+    system_instruction = (
+        "Anda adalah AI Chatbot Asisten untuk platform e-learning bernama Simple LMS. "
+        "Tugas Anda adalah membantu siswa (Student) menemukan dan merekomendasikan kursus yang sesuai, "
+        "serta menjawab pertanyaan seputar materi belajar secara ringkas, ramah, dan solutif.\n\n"
+        "Berikut adalah daftar kursus yang tersedia saat ini di Simple LMS:\n"
+        f"{courses_context}\n\n"
+        "Instruksi tambahan:\n"
+        "1. Jawablah menggunakan Bahasa Indonesia yang ramah dan interaktif.\n"
+        "2. Jika pengguna mencari atau menanyakan tentang kursus/topik tertentu, rekomendasikan kursus yang paling relevan dari daftar di atas. Cantumkan nama kursus, harga, instruktur, dan deskripsi singkat mengapa cocok untuk mereka.\n"
+        "3. Jika tidak ada kursus yang secara langsung cocok, katakan dengan ramah bahwa saat ini kursus tersebut belum tersedia, namun berikan saran kursus lain yang terdekat atau tawarkan bantuan belajar umum.\n"
+        "4. Buat jawaban Anda ringkas, terstruktur (gunakan bullet points jika merekomendasikan beberapa), dan mudah dipahami."
+    )
+    
+    prompt = f"{system_instruction}\n\nPertanyaan Pengguna: {user_message}\nJawaban:"
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+    
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            response_text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+            return {"response": response_text}
+    except urllib.error.HTTPError as e:
+        error_msg = e.read().decode("utf-8")
+        try:
+            error_json = json.loads(error_msg)
+            message = error_json.get("error", {}).get("message", "Kesalahan pada API Gemini")
+        except Exception:
+            message = f"Error HTTP {e.code}"
+        return {"response": f"Gagal menghubungi Gemini API: {message}. Silakan cek kunci API Anda di file .env backend."}
+    except Exception as e:
+        return {"response": f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}"}
+
 

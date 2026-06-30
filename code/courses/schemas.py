@@ -419,3 +419,14 @@ class PrerequisiteOut(Schema):
 
 class PrerequisiteIn(Schema):
     required_course_id: int
+
+
+# CHATBOT SCHEMAS
+
+class ChatbotIn(Schema):
+    message: str
+
+
+class ChatbotOut(Schema):
+    response: str
+
