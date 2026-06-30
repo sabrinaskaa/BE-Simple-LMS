@@ -1987,7 +1987,8 @@ def chatbot_assistant(request, data: ChatbotIn):
         return {"response": response_text}
         
     # 3. Request ke Gemini API
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={gemini_api_key}"
+    # Kita akan mencoba beberapa model alternatif jika model utama sedang padat (high demand)
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest"]
     
     system_instruction = (
         "Anda adalah AI Chatbot Asisten untuk platform e-learning bernama Simple LMS. "
@@ -2016,27 +2017,105 @@ def chatbot_assistant(request, data: ChatbotIn):
         ]
     }
     
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
+    response_text = None
+    last_error_message = ""
     
-    try:
-        with urllib.request.urlopen(req, timeout=20) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            response_text = res_data["candidates"][0]["content"]["parts"][0]["text"]
-            return {"response": response_text}
-    except urllib.error.HTTPError as e:
-        error_msg = e.read().decode("utf-8")
+    for model_name in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
+        
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        
         try:
-            error_json = json.loads(error_msg)
-            message = error_json.get("error", {}).get("message", "Kesalahan pada API Gemini")
-        except Exception:
-            message = f"Error HTTP {e.code}"
-        return {"response": f"Gagal menghubungi Gemini API: {message}. Silakan cek kunci API Anda di file .env backend."}
-    except Exception as e:
-        return {"response": f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}"}
+            with urllib.request.urlopen(req, timeout=12) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+                response_text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+                break  # Berhasil! Keluar dari loop
+        except urllib.error.HTTPError as e:
+            error_msg = e.read().decode("utf-8")
+            try:
+                error_json = json.loads(error_msg)
+                last_error_message = error_json.get("error", {}).get("message", f"HTTP {e.code}")
+            except Exception:
+                last_error_message = f"Error HTTP {e.code}"
+            
+            # Jika API key tidak valid, langsung keluar agar tidak membuang waktu mencoba model lain
+            if any(x in last_error_message.lower() for x in ["key", "api_key", "not valid", "unauthorized"]):
+                break
+            continue  # Coba model alternatif berikutnya
+        except Exception as e:
+            last_error_message = str(e)
+            continue  # Coba model alternatif berikutnya
+
+    if response_text:
+        return {"response": response_text}
+        
+    # 4. Graceful Fallback ke Pencarian Database Lokal (jika semua request AI gagal / limit terlampaui)
+    matching_courses = []
+    STOP_WORDS = {
+        "rekomendasi", "belajar", "kursus", "kelas", "saya", "ingin", "cari", "tahu", "tentang", 
+        "materi", "dosen", "kuliah", "tanya", "bagaimana", "cara", "yang", "untuk", "adalah",
+        "dengan", "pada", "oleh", "atau", "dan", "dari", "bisa", "dapat", "course", "apa", "itu",
+        "tolong", "bantu", "halo", "hai", "selamat", "pagi", "siang", "sore", "malam"
+    }
+    words = [w for w in user_message.lower().split() if w not in STOP_WORDS and len(w) > 2]
+    
+    # Fallback jika kata kunci kosong setelah difilter stop words
+    if not words:
+        words = [w for w in user_message.lower().split() if len(w) > 2]
+        
+    for word in words:
+        matched = Course.objects.filter(
+            Q(name__icontains=word) | Q(description__icontains=word),
+            status="published"
+        ).select_related("teacher")
+        matching_courses.extend(matched)
+        
+    # Remove duplicates
+    unique_matches = []
+    seen_ids = set()
+    for c in matching_courses:
+        if c.id not in seen_ids:
+            seen_ids.add(c.id)
+            unique_matches.append(c)
+            
+    # Cek tipe error
+    is_key_invalid = any(x in last_error_message.lower() for x in ["key", "api_key", "not valid", "unauthorized"])
+    
+    if is_key_invalid:
+        prefix = "[Error - Kunci API Gemini Tidak Valid]\n\n"
+        suffix = "\n\n*(Silakan periksa kunci API `GEMINI_API_KEY` Anda di file `.env` backend)*"
+    else:
+        prefix = "[Layanan AI Padat - Hasil Pencarian Database]\n\n"
+        suffix = f"\n\n*(Catatan: Asisten AI sedang padat. Menampilkan hasil database lokal. Error: {last_error_message})*"
+
+    if unique_matches:
+        recs = []
+        for c in unique_matches[:3]:
+            t_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
+            recs.append(f"- **{c.name}** (Level: {c.level}, Harga: Rp {c.price}) oleh {t_name}")
+        course_recommendations = "\n".join(recs)
+        
+        response_text = (
+            f"{prefix}"
+            f"Halo! Layanan AI Gemini saat ini sedang mengalami lalu lintas tinggi (high demand). "
+            f"Sebagai alternatif, berikut rekomendasi kursus yang relevan dari database kami:\n\n"
+            f"{course_recommendations}"
+            f"{suffix}"
+        )
+    else:
+        response_text = (
+            f"{prefix}"
+            f"Halo! Layanan AI Gemini saat ini sedang mengalami lalu lintas tinggi (high demand). "
+            f"Saya tidak menemukan kursus yang cocok secara spesifik dengan kata kunci Anda di database kami saat ini. "
+            f"Silakan coba kirim pesan Anda beberapa saat lagi."
+            f"{suffix}"
+        )
+        
+    return {"response": response_text}
 
 
