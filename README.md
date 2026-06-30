@@ -436,7 +436,7 @@ BE-Simple-LMS/
     │   ├── api.py
     │   ├── schemas.py
     │   └── ...
-    └── analytics/          # Aplikasi Analytics (MongoDB - Chapter 11)
+    └── analytics/          # Aplikasi Analytics (MongoDB)
         ├── apps.py         # Inisialisasi index MongoDB saat startup
         ├── mongo_service.py# Pymongo singleton, CRUD & Aggregation Pipeline
         ├── api.py          # Endpoint analytics Django Ninja
