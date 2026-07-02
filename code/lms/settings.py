@@ -194,9 +194,10 @@ X_FRAME_OPTIONS = "DENY"
 # Redis, MongoDB, Celery, Email
 # =============================================================================
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+
 MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://mongodb:27017/")
-MONGODB_NAME = os.environ.get("MONGODB_NAME", "lms_logs")              # database untuk system/error logs
-MONGODB_ANALYTICS_DB = os.environ.get("MONGODB_ANALYTICS_DB", "lms_analytics")  # database untuk analytics
+MONGODB_NAME = os.environ.get("MONGODB_NAME", "lms_logs")
+MONGODB_ANALYTICS_DB = os.environ.get("MONGODB_ANALYTICS_DB", "lms_analytics")
 
 CACHES = {
     "default": {
@@ -208,8 +209,17 @@ CACHES = {
     }
 }
 
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "amqp://admin:password123@rabbitmq:5672//")
+RABBITMQ_DEFAULT_USER = os.environ.get("RABBITMQ_DEFAULT_USER", "guest")
+RABBITMQ_DEFAULT_PASS = os.environ.get("RABBITMQ_DEFAULT_PASS", "guest")
+RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
+RABBITMQ_PORT = os.environ.get("RABBITMQ_PORT", "5672")
+
+CELERY_BROKER_URL = os.environ.get(
+    "CELERY_BROKER_URL",
+    f"amqp://{RABBITMQ_DEFAULT_USER}:{RABBITMQ_DEFAULT_PASS}@{RABBITMQ_HOST}:{RABBITMQ_PORT}//",
+)
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/2")
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
