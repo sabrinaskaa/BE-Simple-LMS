@@ -1912,6 +1912,597 @@ def remove_prerequisite(request, course_id: int, prereq_id: int):
 # 10. CHATBOT ASSISTANT
 # =============================================================================
 
+CHATBOT_STOP_WORDS = {
+    "aku", "saya", "gua", "gw", "ingin", "mau", "pengen", "cari", "carikan",
+    "rekomendasi", "rekomendasikan", "kursus", "course", "kelas", "materi",
+    "belajar", "tentang", "untuk", "yang", "dan", "atau", "dari", "dengan",
+    "pada", "di", "ke", "apa", "itu", "ini", "adalah", "bisa", "dapat",
+    "tolong", "bantu", "halo", "hai", "hello", "selamat", "pagi", "siang",
+    "sore", "malam", "bagaimana", "gimana", "cara", "dong", "ya", "min",
+    "admin", "asisten", "lms", "simple", "ada", "adakah", "punya", "tersedia",
+    "termurah", "murah", "paling", "harga", "termahal", "mahal", "gratis",
+    "free", "terbaik", "rating", "populer", "popular"
+}
+
+
+def _chatbot_normalize_text(text: str) -> str:
+    import re
+    return re.sub(r"\s+", " ", (text or "").lower()).strip()
+
+
+def _chatbot_extract_keywords(message: str):
+    import re
+
+    normalized = _chatbot_normalize_text(message)
+
+    aliases = {
+        "js": "javascript",
+        "java script": "javascript",
+        "py": "python",
+        "database": "basis data",
+        "db": "basis data",
+        "html": "html",
+        "css": "css",
+    }
+
+    keywords = []
+
+    for alias, canonical in aliases.items():
+        if alias in normalized and canonical not in keywords:
+            keywords.append(canonical)
+
+    words = re.findall(r"[a-zA-Z0-9+#.]+", normalized)
+
+    for word in words:
+        if len(word) <= 2:
+            continue
+        if word in CHATBOT_STOP_WORDS:
+            continue
+        if word not in keywords:
+            keywords.append(word)
+
+    return keywords[:10]
+
+
+def _chatbot_detect_intent(message: str) -> str:
+    normalized = _chatbot_normalize_text(message)
+
+    if any(word in normalized for word in ["termurah", "paling murah", "harga murah", "murah", "budget"]):
+        return "cheapest"
+
+    if any(word in normalized for word in ["termahal", "paling mahal", "harga mahal"]):
+        return "most_expensive"
+
+    if any(word in normalized for word in ["gratis", "free", "tanpa bayar"]):
+        return "free"
+
+    if any(word in normalized for word in ["terbaik", "rating tertinggi", "rating terbaik", "paling bagus"]):
+        return "best_rating"
+
+    if any(word in normalized for word in ["pemula", "beginner", "dasar"]):
+        return "beginner"
+
+    if any(word in normalized for word in ["intermediate", "menengah", "lanjutan"]):
+        return "intermediate"
+
+    if any(word in normalized for word in ["advanced", "mahir"]):
+        return "advanced"
+
+    if any(word in normalized for word in ["rekomendasi", "rekomendasikan", "cocok", "belajar", "kursus", "course", "kelas"]):
+        return "recommendation"
+
+    return "general"
+
+
+def _chatbot_base_courses():
+    return (
+        Course.objects
+        .filter(status="published")
+        .select_related("teacher", "category")
+    )
+
+
+def _chatbot_teacher_name(course):
+    teacher = getattr(course, "teacher", None)
+
+    if not teacher:
+        return "-"
+
+    full_name = f"{teacher.first_name} {teacher.last_name}".strip()
+    return full_name or teacher.username
+
+
+def _chatbot_format_price(price):
+    try:
+        return f"Rp {int(price):,}".replace(",", ".")
+    except Exception:
+        return f"Rp {price}"
+
+
+def _chatbot_level_label(level: str) -> str:
+    labels = {
+        "beginner": "Beginner",
+        "intermediate": "Intermediate",
+        "advanced": "Advanced",
+    }
+
+    return labels.get(level, level or "-")
+
+
+def _chatbot_add_course(course_map: dict, course, match_note: str = ""):
+    if not course:
+        return
+
+    course_id = course.id
+
+    if course_id not in course_map:
+        course_map[course_id] = {
+            "course": course,
+            "notes": [],
+            "lessons": [],
+            "sections": [],
+        }
+
+    if match_note and match_note not in course_map[course_id]["notes"]:
+        course_map[course_id]["notes"].append(match_note)
+
+
+def _chatbot_find_courses_by_keywords(keywords):
+    course_map = {}
+
+    if not keywords:
+        return []
+
+    course_query = Q()
+
+    for keyword in keywords:
+        course_query |= (
+            Q(name__icontains=keyword)
+            | Q(description__icontains=keyword)
+            | Q(level__icontains=keyword)
+            | Q(category__name__icontains=keyword)
+            | Q(teacher__username__icontains=keyword)
+            | Q(teacher__first_name__icontains=keyword)
+            | Q(teacher__last_name__icontains=keyword)
+        )
+
+    direct_courses = (
+        _chatbot_base_courses()
+        .filter(course_query)
+        .distinct()
+        .order_by("price", "-rating_avg", "id")[:8]
+    )
+
+    for course in direct_courses:
+        _chatbot_add_course(course_map, course, "Cocok dari nama/deskripsi/kategori course")
+
+    content_query = Q()
+
+    for keyword in keywords:
+        content_query |= (
+            Q(name__icontains=keyword)
+            | Q(description__icontains=keyword)
+            | Q(section__title__icontains=keyword)
+        )
+
+    matched_contents = (
+        CourseContent.objects
+        .filter(course_id__status="published")
+        .filter(content_query)
+        .select_related("course_id", "course_id__teacher", "course_id__category", "section")
+        .order_by("course_id__price", "course_id__id", "section__order", "order", "id")[:20]
+    )
+
+    for content in matched_contents:
+        course = content.course_id
+        _chatbot_add_course(course_map, course, "Cocok dari section/lesson di dalam course")
+
+        lesson_name = content.name
+        section_title = content.section.title if content.section else "Tanpa section"
+        lesson_text = f"{section_title} → {lesson_name}"
+
+        if lesson_text not in course_map[course.id]["lessons"]:
+            course_map[course.id]["lessons"].append(lesson_text)
+
+    section_query = Q()
+
+    for keyword in keywords:
+        section_query |= Q(title__icontains=keyword)
+
+    matched_sections = (
+        CourseSection.objects
+        .filter(course__status="published")
+        .filter(section_query)
+        .select_related("course", "course__teacher", "course__category")
+        .order_by("course__price", "course__id", "order", "id")[:20]
+    )
+
+    for section in matched_sections:
+        course = section.course
+        _chatbot_add_course(course_map, course, "Cocok dari nama section")
+
+        if section.title not in course_map[course.id]["sections"]:
+            course_map[course.id]["sections"].append(section.title)
+
+    results = list(course_map.values())
+    results.sort(
+        key=lambda item: (
+            item["course"].price,
+            -float(item["course"].rating_avg),
+            item["course"].id,
+        )
+    )
+
+    return results[:6]
+
+
+def _chatbot_get_db_results(user_message: str):
+    intent = _chatbot_detect_intent(user_message)
+    keywords = _chatbot_extract_keywords(user_message)
+    base_qs = _chatbot_base_courses()
+
+    keyword_results = _chatbot_find_courses_by_keywords(keywords)
+    keyword_course_ids = [item["course"].id for item in keyword_results]
+
+    if intent == "cheapest":
+        qs = base_qs
+
+        if keyword_course_ids:
+            qs = qs.filter(id__in=keyword_course_ids)
+
+        courses = qs.order_by("price", "-rating_avg", "id")[:5]
+
+        return intent, keywords, [
+            {
+                "course": course,
+                "notes": ["Diurutkan dari harga termurah"],
+                "lessons": [],
+                "sections": [],
+            }
+            for course in courses
+        ]
+
+    if intent == "most_expensive":
+        qs = base_qs
+
+        if keyword_course_ids:
+            qs = qs.filter(id__in=keyword_course_ids)
+
+        courses = qs.order_by("-price", "-rating_avg", "id")[:5]
+
+        return intent, keywords, [
+            {
+                "course": course,
+                "notes": ["Diurutkan dari harga termahal"],
+                "lessons": [],
+                "sections": [],
+            }
+            for course in courses
+        ]
+
+    if intent == "free":
+        qs = base_qs.filter(price=0)
+
+        if keyword_course_ids:
+            qs = qs.filter(id__in=keyword_course_ids)
+
+        courses = qs.order_by("-rating_avg", "id")[:5]
+
+        return intent, keywords, [
+            {
+                "course": course,
+                "notes": ["Course gratis"],
+                "lessons": [],
+                "sections": [],
+            }
+            for course in courses
+        ]
+
+    if intent == "best_rating":
+        qs = base_qs
+
+        if keyword_course_ids:
+            qs = qs.filter(id__in=keyword_course_ids)
+
+        courses = qs.order_by("-rating_avg", "-total_reviews", "price", "id")[:5]
+
+        return intent, keywords, [
+            {
+                "course": course,
+                "notes": ["Diurutkan dari rating tertinggi"],
+                "lessons": [],
+                "sections": [],
+            }
+            for course in courses
+        ]
+
+    if intent in {"beginner", "intermediate", "advanced"}:
+        level_map = {
+            "beginner": "beginner",
+            "intermediate": "intermediate",
+            "advanced": "advanced",
+        }
+
+        qs = base_qs.filter(level=level_map[intent])
+
+        if keyword_course_ids:
+            qs = qs.filter(id__in=keyword_course_ids)
+
+        courses = qs.order_by("price", "-rating_avg", "id")[:5]
+
+        return intent, keywords, [
+            {
+                "course": course,
+                "notes": [f"Level {_chatbot_level_label(course.level)}"],
+                "lessons": [],
+                "sections": [],
+            }
+            for course in courses
+        ]
+
+    if keyword_results:
+        return intent, keywords, keyword_results
+
+    courses = base_qs.order_by("price", "-rating_avg", "id")[:5]
+
+    return intent, keywords, [
+        {
+            "course": course,
+            "notes": ["Course published dari database"],
+            "lessons": [],
+            "sections": [],
+        }
+        for course in courses
+    ]
+
+
+def _chatbot_format_course_item(item, index: int = 1):
+    course = item["course"]
+    category_name = course.category.name if course.category else "Tanpa kategori"
+    teacher_name = _chatbot_teacher_name(course)
+    description = (course.description or "-").replace("\n", " ").strip()
+
+    if len(description) > 140:
+        description = description[:140] + "..."
+
+    text = (
+        f"{index}. **{course.name}**\n"
+        f"   - Level: {_chatbot_level_label(course.level)}\n"
+        f"   - Kategori: {category_name}\n"
+        f"   - Harga: {_chatbot_format_price(course.price)}\n"
+        f"   - Instruktur: {teacher_name}\n"
+        f"   - Rating: {course.rating_avg} / 5.0 dari {course.total_reviews} review\n"
+        f"   - Deskripsi: {description}"
+    )
+
+    if item.get("sections"):
+        text += f"\n   - Section terkait: {', '.join(item['sections'][:3])}"
+
+    if item.get("lessons"):
+        text += f"\n   - Materi/lesson terkait: {', '.join(item['lessons'][:4])}"
+
+    if item.get("notes"):
+        text += f"\n   - Alasan cocok: {', '.join(item['notes'][:2])}"
+
+    return text
+
+
+def _chatbot_build_db_answer(user_message: str, intent: str, keywords, results):
+    if not results:
+        if intent == "free":
+            return "Saat ini belum ada course gratis yang berstatus **published** di database."
+
+        return "Saat ini belum ada course published yang cocok di database LMS."
+
+    course_lines = [
+        _chatbot_format_course_item(item, index=i + 1)
+        for i, item in enumerate(results[:5])
+    ]
+
+    course_text = "\n\n".join(course_lines)
+
+    if intent == "cheapest":
+        first = results[0]["course"]
+
+        opening = (
+            "Berdasarkan data course **published** di database, course termurah saat ini adalah "
+            f"**{first.name}** dengan harga **{_chatbot_format_price(first.price)}**."
+        )
+
+        if len(results) > 1:
+            opening += "\n\nBerikut urutan course dari yang paling murah:"
+
+        return f"{opening}\n\n{course_text}"
+
+    if intent == "most_expensive":
+        first = results[0]["course"]
+
+        return (
+            "Berdasarkan data course **published** di database, course termahal saat ini adalah "
+            f"**{first.name}** dengan harga **{_chatbot_format_price(first.price)}**.\n\n"
+            f"{course_text}"
+        )
+
+    if intent == "free":
+        return f"Saya menemukan course gratis berikut dari database:\n\n{course_text}"
+
+    if intent == "best_rating":
+        return f"Berikut course dengan rating terbaik berdasarkan database:\n\n{course_text}"
+
+    if intent in {"beginner", "intermediate", "advanced"}:
+        return (
+            f"Berikut course level {_chatbot_level_label(results[0]['course'].level)} "
+            f"yang tersedia di database:\n\n{course_text}"
+        )
+
+    if keywords:
+        keyword_text = ", ".join(keywords[:5])
+
+        return (
+            f"Saya mencocokkan pertanyaan Anda dengan database menggunakan kata kunci "
+            f"**{keyword_text}**.\n\n"
+            f"Hasil yang paling relevan:\n\n{course_text}"
+        )
+
+    return f"Berikut beberapa course published yang tersedia di database LMS:\n\n{course_text}"
+
+
+def _chatbot_course_context_for_ai(results):
+    if not results:
+        return "Tidak ada course published yang cocok."
+
+    lines = []
+
+    for item in results[:6]:
+        course = item["course"]
+        category_name = course.category.name if course.category else "Tanpa kategori"
+        teacher_name = _chatbot_teacher_name(course)
+        lessons = "; ".join(item.get("lessons", [])[:5]) or "-"
+        sections = "; ".join(item.get("sections", [])[:5]) or "-"
+        description = (course.description or "-").replace("\n", " ")[:220]
+
+        lines.append(
+            f"- {course.name} | Level: {_chatbot_level_label(course.level)} | "
+            f"Kategori: {category_name} | Harga: {_chatbot_format_price(course.price)} | "
+            f"Instruktur: {teacher_name} | Rating: {course.rating_avg} | "
+            f"Review: {course.total_reviews} | Section cocok: {sections} | "
+            f"Lesson cocok: {lessons} | Deskripsi: {description}"
+        )
+
+    return "\n".join(lines)
+
+
+def _chatbot_call_gemini(user_message: str, db_answer: str, db_context: str):
+    import json
+    import socket
+    import urllib.error
+    import urllib.request
+
+    gemini_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+
+    if not gemini_api_key:
+        return None, "GEMINI_API_KEY belum dikonfigurasi"
+
+    if gemini_api_key.lower() in {
+        "none",
+        "null",
+        "changeme",
+        "your-api-key",
+        "isi-api-key-di-sini",
+    }:
+        return None, "GEMINI_API_KEY masih placeholder"
+
+    model_names = []
+    primary_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    fallback_models = os.environ.get(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash",
+    )
+
+    if primary_model:
+        model_names.append(primary_model)
+
+    model_names.extend([
+        model.strip()
+        for model in fallback_models.split(",")
+        if model.strip()
+    ])
+
+    unique_models = []
+
+    for model_name in model_names:
+        if model_name not in unique_models:
+            unique_models.append(model_name)
+
+    system_instruction = (
+        "Anda adalah asisten Simple LMS. Jawab dalam Bahasa Indonesia. "
+        "Jawaban utama HARUS mengikuti hasil query database yang diberikan backend. "
+        "Jangan mengganti nama course, harga, instruktur, level, section, atau lesson. "
+        "Jangan mengarang course yang tidak ada pada DATABASE_CONTEXT. "
+        "Jika DATABASE_ANSWER sudah cukup, cukup rapikan bahasanya tanpa mengubah fakta.\n\n"
+        f"DATABASE_CONTEXT:\n{db_context}\n\n"
+        f"DATABASE_ANSWER:\n{db_answer}"
+    )
+
+    payload = {
+        "systemInstruction": {
+            "parts": [
+                {
+                    "text": system_instruction
+                }
+            ]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": user_message
+                    }
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "topP": 0.8,
+            "maxOutputTokens": 700,
+        },
+    }
+
+    timeout_seconds = int(os.environ.get("GEMINI_TIMEOUT_SECONDS", "15"))
+    last_error = ""
+
+    for model_name in unique_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": gemini_api_key,
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+            candidates = data.get("candidates") or []
+
+            for candidate in candidates:
+                parts = (candidate.get("content") or {}).get("parts") or []
+                text = "\n".join([
+                    part.get("text", "")
+                    for part in parts
+                ]).strip()
+
+                if text:
+                    return text, ""
+
+            last_error = f"Model {model_name} tidak mengembalikan teks"
+
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode("utf-8", errors="ignore")
+            last_error = f"HTTP {error.code}: {raw[:300]}"
+
+            if error.code in [401, 403]:
+                return None, "GEMINI_API_KEY tidak valid atau tidak punya izin"
+
+            continue
+
+        except (urllib.error.URLError, socket.timeout) as error:
+            last_error = f"Koneksi/timeout Gemini: {error}"
+            continue
+
+        except Exception as error:
+            last_error = f"Error Gemini: {error}"
+            continue
+
+    return None, last_error or "Gemini tidak mengembalikan jawaban"
+
+
 @api.post(
     "/chatbot",
     auth=api_auth,
@@ -1921,201 +2512,81 @@ def remove_prerequisite(request, course_id: int, prereq_id: int):
 )
 @require_student
 def chatbot_assistant(request, data: ChatbotIn):
-    import json
-    import urllib.request
-    import urllib.error
-    
-    user_message = data.message.strip()
+    user_message = (data.message or "").strip()
+
     if not user_message:
         raise HttpError(400, "Pesan tidak boleh kosong")
-    
-    # 1. Dapatkan daftar kursus yang aktif/published untuk context
-    courses = Course.objects.filter(status="published").select_related("teacher", "category")
-    course_list = []
-    for c in courses:
-        cat_name = c.category.name if c.category else "Tanpa Kategori"
-        teacher_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
-        course_list.append(
-            f"- {c.name} (Level: {c.level}) - Kategori: {cat_name} - Harga: Rp {c.price} - Instruktur: {teacher_name}. Deskripsi: {c.description}"
-        )
-    courses_context = "\n".join(course_list)
-    
-    # 2. Cek apakah GEMINI_API_KEY ada di environment
-    gemini_api_key = os.environ.get("GEMINI_API_KEY")
-    
-    if not gemini_api_key:
-        # Fallback offline: Lakukan pencarian kata kunci sederhana dari database
-        matching_courses = []
-        words = user_message.lower().split()
-        for word in words:
-            if len(word) > 2:  # cari kata kunci yang cukup panjang
-                # cari course yang memiliki kecocokan nama atau deskripsi
-                matched = Course.objects.filter(
-                    Q(name__icontains=word) | Q(description__icontains=word),
-                    status="published"
-                ).select_related("teacher")
-                matching_courses.extend(matched)
-        
-        # Remove duplicates
-        unique_matches = []
-        seen_ids = set()
-        for c in matching_courses:
-            if c.id not in seen_ids:
-                seen_ids.add(c.id)
-                unique_matches.append(c)
-                
-        if unique_matches:
-            recs = []
-            for c in unique_matches[:3]:
-                t_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
-                recs.append(f"- **{c.name}** (Level: {c.level}, Harga: Rp {c.price}) oleh {t_name}")
-            course_recommendations = "\n".join(recs)
-            
-            response_text = (
-                "[Demo Mode - GEMINI_API_KEY belum dikonfigurasi di file .env]\n\n"
-                f"Halo! Saya mendeteksi Anda mencari kursus terkait. Berikut beberapa rekomendasi dari database kami:\n\n"
-                f"{course_recommendations}\n\n"
-                "Untuk mengaktifkan asisten AI pintar Gemini, silakan konfigurasikan kunci API `GEMINI_API_KEY` di file `.env` backend Anda."
-            )
-        else:
-            response_text = (
-                "[Demo Mode - GEMINI_API_KEY belum dikonfigurasi di file .env]\n\n"
-                "Halo! Saya adalah asisten virtual Simple LMS. Untuk saat ini, kunci API Gemini belum dikonfigurasi. "
-                "Namun, Anda dapat melihat daftar kursus secara lengkap di halaman utama (Dashboard/Course) atau "
-                "mengonfigurasikan `GEMINI_API_KEY` pada file `.env` di backend untuk mengaktifkan AI."
-            )
-        return {"response": response_text}
-        
-    # 3. Request ke Gemini API
-    # Kita akan mencoba beberapa model alternatif jika model utama sedang padat (high demand)
-    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest"]
-    
-    system_instruction = (
-        "Anda adalah AI Chatbot Asisten untuk platform e-learning bernama Simple LMS. "
-        "Tugas Anda adalah membantu siswa (Student) menemukan dan merekomendasikan kursus yang sesuai, "
-        "serta menjawab pertanyaan seputar materi belajar secara ringkas, ramah, dan solutif.\n\n"
-        "Berikut adalah daftar kursus yang tersedia saat ini di Simple LMS:\n"
-        f"{courses_context}\n\n"
-        "Instruksi tambahan:\n"
-        "1. Jawablah menggunakan Bahasa Indonesia yang ramah dan interaktif.\n"
-        "2. Jika pengguna mencari atau menanyakan tentang kursus/topik tertentu, rekomendasikan kursus yang paling relevan dari daftar di atas. Cantumkan nama kursus, harga, instruktur, dan deskripsi singkat mengapa cocok untuk mereka.\n"
-        "3. Jika tidak ada kursus yang secara langsung cocok, katakan dengan ramah bahwa saat ini kursus tersebut belum tersedia, namun berikan saran kursus lain yang terdekat atau tawarkan bantuan belajar umum.\n"
-        "4. Buat jawaban Anda ringkas, terstruktur (gunakan bullet points jika merekomendasikan beberapa), dan mudah dipahami."
-    )
-    
-    prompt = f"{system_instruction}\n\nPertanyaan Pengguna: {user_message}\nJawaban:"
-    
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ]
+
+    intent, keywords, results = _chatbot_get_db_results(user_message)
+    db_answer = _chatbot_build_db_answer(user_message, intent, keywords, results)
+    db_context = _chatbot_course_context_for_ai(results)
+
+    # Untuk pertanyaan yang sifatnya data pasti dari database,
+    # langsung return hasil DB agar Gemini tidak mengarang data.
+    deterministic_intents = {
+        "cheapest",
+        "most_expensive",
+        "free",
+        "best_rating",
+        "beginner",
+        "intermediate",
+        "advanced",
+        "recommendation",
     }
-    
-    response_text = None
-    last_error_message = ""
-    
-    for model_name in candidate_models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
-        
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        
+
+    if intent in deterministic_intents or keywords:
         try:
-            with urllib.request.urlopen(req, timeout=12) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-                response_text = res_data["candidates"][0]["content"]["parts"][0]["text"]
-                break  # Berhasil! Keluar dari loop
-        except urllib.error.HTTPError as e:
-            error_msg = e.read().decode("utf-8")
-            try:
-                error_json = json.loads(error_msg)
-                last_error_message = error_json.get("error", {}).get("message", f"HTTP {e.code}")
-            except Exception:
-                last_error_message = f"Error HTTP {e.code}"
-            
-            # Jika API key tidak valid, langsung keluar agar tidak membuang waktu mencoba model lain
-            if any(x in last_error_message.lower() for x in ["key", "api_key", "not valid", "unauthorized"]):
-                break
-            continue  # Coba model alternatif berikutnya
-        except Exception as e:
-            last_error_message = str(e)
-            continue  # Coba model alternatif berikutnya
+            log_activity(
+                request.user,
+                "chatbot_db_first_response",
+                {
+                    "message": user_message[:200],
+                    "intent": intent,
+                    "keywords": keywords,
+                    "result_count": len(results),
+                },
+            )
+        except Exception:
+            pass
 
-    if response_text:
-        return {"response": response_text}
-        
-    # 4. Graceful Fallback ke Pencarian Database Lokal (jika semua request AI gagal / limit terlampaui)
-    matching_courses = []
-    STOP_WORDS = {
-        "rekomendasi", "belajar", "kursus", "kelas", "saya", "ingin", "cari", "tahu", "tentang", 
-        "materi", "dosen", "kuliah", "tanya", "bagaimana", "cara", "yang", "untuk", "adalah",
-        "dengan", "pada", "oleh", "atau", "dan", "dari", "bisa", "dapat", "course", "apa", "itu",
-        "tolong", "bantu", "halo", "hai", "selamat", "pagi", "siang", "sore", "malam"
-    }
-    words = [w for w in user_message.lower().split() if w not in STOP_WORDS and len(w) > 2]
-    
-    # Fallback jika kata kunci kosong setelah difilter stop words
-    if not words:
-        words = [w for w in user_message.lower().split() if len(w) > 2]
-        
-    for word in words:
-        matched = Course.objects.filter(
-            Q(name__icontains=word) | Q(description__icontains=word),
-            status="published"
-        ).select_related("teacher")
-        matching_courses.extend(matched)
-        
-    # Remove duplicates
-    unique_matches = []
-    seen_ids = set()
-    for c in matching_courses:
-        if c.id not in seen_ids:
-            seen_ids.add(c.id)
-            unique_matches.append(c)
-            
-    # Cek tipe error
-    is_key_invalid = any(x in last_error_message.lower() for x in ["key", "api_key", "not valid", "unauthorized"])
-    
-    if is_key_invalid:
-        prefix = "[Error - Kunci API Gemini Tidak Valid]\n\n"
-        suffix = "\n\n*(Silakan periksa kunci API `GEMINI_API_KEY` Anda di file `.env` backend)*"
-    else:
-        prefix = "[Layanan AI Padat - Hasil Pencarian Database]\n\n"
-        suffix = f"\n\n*(Catatan: Asisten AI sedang padat. Menampilkan hasil database lokal. Error: {last_error_message})*"
+        return {"response": db_answer}
 
-    if unique_matches:
-        recs = []
-        for c in unique_matches[:3]:
-            t_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
-            recs.append(f"- **{c.name}** (Level: {c.level}, Harga: Rp {c.price}) oleh {t_name}")
-        course_recommendations = "\n".join(recs)
-        
-        response_text = (
-            f"{prefix}"
-            f"Halo! Layanan AI Gemini saat ini sedang mengalami lalu lintas tinggi (high demand). "
-            f"Sebagai alternatif, berikut rekomendasi kursus yang relevan dari database kami:\n\n"
-            f"{course_recommendations}"
-            f"{suffix}"
+    ai_response, ai_error = _chatbot_call_gemini(
+        user_message=user_message,
+        db_answer=db_answer,
+        db_context=db_context,
+    )
+
+    if ai_response:
+        try:
+            log_activity(
+                request.user,
+                "chatbot_ai_response",
+                {
+                    "message": user_message[:200],
+                    "intent": intent,
+                    "keywords": keywords,
+                    "result_count": len(results),
+                },
+            )
+        except Exception:
+            pass
+
+        return {"response": ai_response}
+
+    try:
+        log_activity(
+            request.user,
+            "chatbot_db_fallback_response",
+            {
+                "message": user_message[:200],
+                "intent": intent,
+                "keywords": keywords,
+                "result_count": len(results),
+                "ai_error": ai_error[:300] if ai_error else "",
+            },
         )
-    else:
-        response_text = (
-            f"{prefix}"
-            f"Halo! Layanan AI Gemini saat ini sedang mengalami lalu lintas tinggi (high demand). "
-            f"Saya tidak menemukan kursus yang cocok secara spesifik dengan kata kunci Anda di database kami saat ini. "
-            f"Silakan coba kirim pesan Anda beberapa saat lagi."
-            f"{suffix}"
-        )
-        
-    return {"response": response_text}
+    except Exception:
+        pass
 
-
+    return {"response": db_answer}
