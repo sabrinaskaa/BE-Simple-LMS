@@ -43,9 +43,16 @@ Untuk Paket 1 (LMS Experience), project ini mengimplementasikan fitur advanced s
 | MongoDB analytics (analytics app) | ✅ Selesai |
 | Swagger/OpenAPI docs | ✅ Selesai |
 | Redis caching + rate limiting | ✅ Selesai |
-| **Publishing Workflow (submit → review → approve/reject)** | ✅ Selesai |
-| **Course Prerequisites (validasi enrollment)** | ✅ Selesai |
-| **Student Chatbot Assistant (Gemini LLM)** | ✅ Selesai |
+| Publishing Workflow (submit → review → approve/reject) | ✅ Selesai |
+| Course Prerequisites (validasi enrollment) | ✅ Selesai |
+| Student Chatbot Assistant (Gemini LLM) | ✅ Selesai |
+| API Versioning (v1 & v2) | ✅ Selesai |
+| Database & Cache Benchmarking | ✅ Selesai |
+| Quizzes & Assessments | ✅ Selesai |
+| Comments & Discussions | ✅ Selesai |
+| Learning Map Endpoint | ✅ Selesai |
+| Advanced Analytics CRUD (Admin) | ✅ Selesai |
+
 
 ---
 
@@ -65,6 +72,8 @@ Untuk Paket 1 (LMS Experience), project ini mengimplementasikan fitur advanced s
 | No | Fitur | Deskripsi Singkat |
 |----|-------|-------------------|
 | 1 | Student Chatbot Assistant (Gemini LLM) | AI Chatbot interaktif terintegrasi Google Gemini API (`gemini-flash-latest`) untuk menjawab pertanyaan siswa dan merekomendasikan kursus berdasarkan database sistem. |
+| 2 | API Versioning & Multiple Routers | Pemisahan endpoint ke dalam namespace `v1` dan `v2` secara paralel tanpa merusak kompatibilitas client lama. |
+| 3 | Profiling & Benchmarking | Command Django kustom (`benchmark_lms`, `benchmark_mongo`) untuk membuktikan optimasi jumlah query PostgreSQL dan performa Redis caching. |
 
 
 ---
@@ -316,6 +325,16 @@ GET  /api/v1/enrollments/{id}/progress   [Auth: Student/Admin]
 GET /api/v1/dashboard/student            [Auth: Login]
 ```
 
+
+### Fitur 5 — Quizzes & Comments
+```
+GET    /api/v1/courses/{id}/quizzes
+POST   /api/v1/courses/{id}/quizzes
+POST   /api/v1/quizzes/{quiz_id}/attempts/{attempt_id}/submit
+GET    /api/v1/comments/?content_id={id}
+POST   /api/v1/comments/
+```
+
 ### Fitur 7 — Student Chatbot Assistant (Gemini LLM)
 ```
 POST /api/v1/chatbot                     [Auth: Student]
@@ -376,8 +395,13 @@ test_register_email_duplikat (courses.test_auth.AuthRegisterTest) ... ok
 test_register_otomatis_jadi_student (courses.test_auth.AuthRegisterTest) ... ok
 test_register_sukses (courses.test_auth.AuthRegisterTest) ... ok
 test_register_username_duplikat (courses.test_auth.AuthRegisterTest) ... ok
-test_login_password_salah (courses.test_auth.AuthLoginTest) ... ok
+... (output dipersingkat)
 test_login_sukses (courses.test_auth.AuthLoginTest) ... ok
+
+----------------------------------------------------------------------
+Ran 88 tests in 131.430s
+
+OK
 test_login_user_tidak_ada (courses.test_auth.AuthLoginTest) ... ok
 test_refresh_dengan_access_token_ditolak (courses.test_auth.AuthRefreshTokenTest) ... ok
 test_refresh_dengan_token_tidak_valid (courses.test_auth.AuthRefreshTokenTest) ... ok
@@ -590,6 +614,33 @@ Integrasi antarmuka chat dibangun secara kustom di sisi frontend:
 
 ---
 
+
+### 8. Quizzes & Assessments
+Platform ini menyediakan fitur kuis yang mendalam, terintegrasi dengan struktur kurikulum (Sections).
+- **Model**: `Quiz`, `QuizQuestion` (Bank soal), `QuizAttempt`, dan `QuizAttemptAnswer`.
+- **Fitur**: Kuis mendukung attempt berulang dengan cooldown, kalkulasi skor otomatis, passing grade (minimum score), dan soal yang bisa diacak (randomized) jika diatur.
+- **Endpoint**: Terdapat endpoint lengkap untuk CRUD kuis, CRUD question bank, memulai kuis, dan submit attempt.
+
+### 9. Comments & Discussions
+Fitur diskusi yang terikat langsung pada setiap konten/lesson.
+- **Model**: `Comment` (berelasi ke `CourseContent` dan `CourseMember`).
+- **Fitur**: Mahasiswa yang sudah enroll dapat bertanya atau berdiskusi. Terdapat fitur update/delete komentar milik sendiri, dan Admin/Owner dapat menghapus komentar apa saja.
+
+### 10. API Versioning (v1 & v2)
+Proyek ini telah dikonfigurasi untuk menangani transisi evolusi API di masa depan menggunakan teknik URL Namespace Versioning bawaan dari Django Ninja.
+
+
+* **API v1 (`/api/v1/`)**: Mewakili versi API yang stabil, lengkap, dan digunakan secara aktif di production/frontend.
+* **API v2 (`/api/v2/`)**: Mewakili versi eksperimental yang berjalan di samping v1 tanpa menimbulkan regresi. Endpoint v2 (`api_v2.py`) mendemonstrasikan implementasi ulang endpoint `GET /courses` dengan respons yang lebih ramping.
+* **Separation of Concerns**: Dokumentasi Swagger (OpenAPI) terpisah sempurna untuk setiap versi, yaitu `/api/v1/docs` dan `/api/v2/docs`.
+
+### 9. Benchmarking & Optimasi Performa
+
+Sistem backend ini teruji keandalannya untuk _read-heavy traffic_. Pembuktian optimasi dapat diukur langsung oleh penguji menggunakan command lokal:
+* `python manage.py benchmark_lms --iterations 5`: Menampilkan _first request latency_ vs _warm average latency_ (cache layer) serta memastikan fenomena **N+1 Queries** terhindar berkat `select_related` pada ORM.
+
+---
+
 **Endpoint baru:**
 - `POST /chatbot` — Mengirimkan pesan mahasiswa ke asisten AI (hanya diakses oleh user ber-role **Student**).
 
@@ -600,120 +651,3 @@ Integrasi antarmuka chat dibangun secara kustom di sisi frontend:
 Project Simple LMS Extended Backend berhasil mengimplementasikan semua 4 fitur Paket 1 dengan total 51 poin, ditambah dua fitur backend lanjutan: **Publishing Workflow** (approval flow sebelum publish) dan **Course Prerequisites** (validasi prasyarat saat enrollment). Hal yang paling dipelajari adalah pentingnya membaca kode existing sebelum mengimplementasikan fitur baru — sebagian besar infrastruktur (models, cache, permissions) sudah tersedia, sehingga fokus bisa pada gap analysis dan penyempurnaan detail.
 
 Tantangan terbesar adalah memastikan konsistensi format response antara schema Pydantic dan data yang dikembalikan dari ORM, terutama untuk progress detail yang memerlukan nested structure (sections → lessons). Ke depannya, dapat ditingkatkan dengan menambahkan background task Celery untuk recalculate statistik dashboard secara berkala agar tidak bergantung sepenuhnya pada cache.
-
-
----
-
-## Update Terbaru: Penyesuaian Gap Dokumen Penilaian
-
-Bagian ini menjelaskan update yang ditambahkan setelah evaluasi dokumen Optimasi Database, Advanced API Features, Automated Testing, Redis, MongoDB, dan Message Brokers & Async Tasks. Update hanya difokuskan pada item yang belum lengkap atau belum terlihat, tanpa menghapus fitur LMS yang sudah ada.
-
-### 1. Optimasi Database
-
-Seeder `seed_data.py` diperbesar agar data pengujian performa lebih sesuai dengan kebutuhan dokumen optimasi database. Secara default, command berikut:
-
-```bash
-python manage.py seed_data
-```
-
-akan membuat dataset besar: 20 instructor, 200 student, 100 course, minimal 500 enrollment, 800+ lesson/content, dan minimal 1000 komentar. Selain itu, ditambahkan command benchmark:
-
-```bash
-python manage.py benchmark_lms --iterations 5
-```
-
-yang menghasilkan laporan markdown di `docs/BENCHMARK_RESULTS.md` untuk membandingkan response awal dan response warm/cache.
-
-### 2. Advanced API Features
-
-Upload file materi diperbaiki agar tidak hanya berorientasi PDF. Backend sekarang membaca `ALLOWED_UPLOAD_EXTENSIONS` dari environment dan mendukung `.pdf`, `.doc`, `.docx`, `.ppt`, `.pptx`, `.mp4`, `.png`, `.jpg`, dan `.jpeg`. Frontend juga diperbarui agar input upload menerima tipe file tersebut.
-
-### 3. Automated Testing
-
-Konfigurasi testing diperkuat dengan:
-
-- `.coveragerc` dengan target minimal coverage 80%
-- dependency `coverage` untuk laporan coverage
-- dependency `locust` untuk load testing
-- dependency `factory-boy` untuk pengembangan fixture/factory test
-- `locustfile.py` untuk simulasi load test endpoint course list, search/sorting/pagination, dan analytics popular courses
-
-### 4. Redis
-
-Redis tidak hanya dipakai untuk cache dan rate limit, tetapi sekarang juga memiliki cache metrics sederhana. Endpoint admin baru:
-
-```text
-GET  /api/v1/cache/metrics
-POST /api/v1/cache/metrics/reset
-```
-
-menampilkan hit, miss, total request cache, dan hit rate percent. Ini membantu pembuktian peningkatan performa sebelum/sesudah cache.
-
-### 5. MongoDB
-
-MongoDB analytics diperkuat dengan index tambahan untuk `activity_logs` dan `request_logs`. Selain summary analytics, admin sekarang bisa melihat raw logs melalui:
-
-```text
-GET    /api/v1/analytics/activity-logs/
-PATCH  /api/v1/analytics/activity-logs/{log_id}/
-DELETE /api/v1/analytics/activity-logs/{log_id}/
-GET    /api/v1/analytics/request-logs/
-```
-
-Dengan ini, implementasi CRUD MongoDB menjadi lebih terlihat di Swagger.
-
-### 6. Message Broker & Async Task
-
-RabbitMQ credential dipindahkan ke `.env`, lalu Celery routing ditambahkan untuk queue:
-
-```text
-default, emails, reports, certificates, maintenance
-```
-
-Worker Docker Compose juga disesuaikan agar mengonsumsi queue tersebut. Dengan ini, pembagian async task seperti email, laporan, sertifikat, dan maintenance lebih jelas ketika dipantau lewat Flower atau RabbitMQ Management UI.
-
-### 7. Authentication & Authorization
-
-Endpoint lama tetap dipertahankan, tetapi ditambahkan alias agar kompatibel dengan penamaan dokumen:
-
-```text
-POST /api/v1/auth/sign-in
-POST /api/v1/auth/token-refresh
-```
-
-Selain itu, ditambahkan:
-
-```text
-POST /api/v1/auth/logout
-```
-
-yang melakukan blacklist access token dan refresh token opsional di Redis sampai token expired. Token baru juga memiliki `jti` sebagai unique token identifier.
-
-### 8. Dokumentasi Tambahan
-
-Dua file dokumentasi baru ditambahkan:
-
-```text
-docs/IMPLEMENTATION_GAP_UPDATES.md
-docs/TESTING_AND_BENCHMARK_GUIDE.md
-```
-
-Keduanya menjelaskan cara menjalankan seed besar, benchmark, coverage, Locust, Redis metrics, MongoDB raw logs, serta monitoring RabbitMQ/Flower.
-
-## Update v3 — Penyelarasan Akhir dengan Dokumen Penilaian
-
-Pada versi v3, sisa gap dari dokumen-dokumen penilaian ditutup melalui perubahan berikut:
-
-1. Endpoint lab optimasi database dipublikasikan ke Swagger `/api/v1/docs` dengan prefix `/api/v1/lab/...`.
-2. File upload lesson kini mempertahankan ekstensi asli file dan tidak lagi dipaksa menjadi `.pdf`.
-3. Rate limiting menambahkan header `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, dan `Retry-After`.
-4. Endpoint demo Django Ninja pagination tersedia melalui `/api/v1/courses-ninja-pagination` dengan decorator `@paginate(PageNumberPagination)`.
-5. API versioning paralel tersedia di `/api/v2/docs`.
-6. Endpoint literal `/api/v1/comments/` ditambahkan untuk komentar content-level dengan RBAC owner/admin/student enrolled.
-7. JWT custom PyJWT mendukung HS256 dan RS256; command `make_rsa` ditambahkan untuk membuat RSA key pair.
-8. Factory Boy dipakai melalui `courses/factories.py`, serta workflow CI/CD testing tersedia di `.github/workflows/django-tests.yml`.
-9. Redis write-through cache diterapkan pada detail course setelah create/update/recalculate rating.
-10. MongoDB benchmark command tersedia melalui `python manage.py benchmark_mongo`.
-11. Celery RabbitMQ queue diperluas dengan `uploads` dan `dead_letter`; task `process_uploaded_material` berjalan asynchronous setelah upload materi.
-
-Dengan update ini, implementasi backend lebih selaras dengan materi Optimasi Database, Authentication & Authorization, Advanced API Features, Automated Testing, Redis, MongoDB, dan Message Brokers & Async Tasks.

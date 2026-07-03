@@ -16,7 +16,10 @@ Proyek ini menerapkan arsitektur **polyglot persistence**:
 - [Cara Menjalankan Project](#cara-menjalankan-project)
 - [Akun Demo](#akun-demo)
 - [Dokumentasi API (Swagger)](#dokumentasi-api-swagger)
+- [API Versioning (v1 & v2)](#api-versioning-v1--v2)
 - [Daftar Endpoint](#daftar-endpoint)
+- [Cara Menjalankan Test](#cara-menjalankan-test)
+- [Cara Menjalankan Benchmark](#cara-menjalankan-benchmark)
 - [Struktur Project](#struktur-project)
 - [Update Penyesuaian Dokumen](#update-penyesuaian-dokumen)
 
@@ -160,6 +163,22 @@ Untuk mengakses endpoint yang membutuhkan autentikasi:
 
 ---
 
+## API Versioning (v1 & v2)
+
+Proyek ini menerapkan arsitektur **API Versioning** menggunakan fitur multiple router NinjaAPI untuk menjaga kompatibilitas klien:
+- **API v1 (`/api/v1/...`)**: Endpoint utama yang lengkap, mencakup seluruh fitur LMS.
+- **API v2 (`/api/v2/...`)**: Endpoint versi baru eksperimental, berjalan paralel tanpa mengganggu trafik v1.
+
+Contoh endpoint v2:
+- `GET /api/v2/health`
+- `GET /api/v2/courses` (versi lebih ringan)
+
+Dokumentasi Swagger masing-masing versi terpisah secara rapi:
+- v1: `http://localhost:8000/api/v1/docs`
+- v2: `http://localhost:8000/api/v2/docs`
+
+---
+
 ## Daftar Endpoint
 
 Semua endpoint berada di bawah prefix `/api/v1/`.
@@ -258,6 +277,26 @@ Semua endpoint berada di bawah prefix `/api/v1/`.
 | `GET` | `/enrollments/{id}/progress` | ✅ | Student/Admin | Progress detail per section + persentase |
 
 > Enrollment ditolak `403` jika student belum menyelesaikan course prerequisite (100% lesson progress).
+
+
+### 📝 Quizzes & Assessments
+
+| Method | Endpoint | Auth | Role | Deskripsi |
+|---|---|---|---|---|
+| `GET` | `/courses/{id}/quizzes` | ❌ | Semua | List kuis pada course |
+| `POST` | `/courses/{id}/quizzes` | ✅ | Instructor/Admin | Buat kuis baru |
+| `GET` | `/courses/{id}/quizzes/{quiz_id}/questions` | ✅ | Instructor/Admin | List soal di question bank |
+| `POST` | `/quizzes/{quiz_id}/start` | ✅ | Student (enrolled) | Mulai attempt kuis |
+| `POST` | `/quizzes/{quiz_id}/attempts/{attempt_id}/submit` | ✅ | Student (enrolled) | Submit jawaban kuis |
+
+### 💬 Comments (Diskusi Lesson)
+
+| Method | Endpoint | Auth | Role | Deskripsi |
+|---|---|---|---|---|
+| `GET` | `/comments/?content_id={id}` | ✅ | Student/Admin | List komentar pada sebuah lesson |
+| `POST` | `/comments/` | ✅ | Student (enrolled) | Posting komentar pada lesson |
+| `PATCH` | `/comments/{id}/` | ✅ | Owner | Update komentar sendiri |
+| `DELETE` | `/comments/{id}/` | ✅ | Owner/Admin | Hapus komentar |
 
 ### 📊 Student Dashboard
 
@@ -366,6 +405,11 @@ Semua endpoint analytics baru di-mount di bawah path `/api/v1/analytics/`.
 | `GET` | `/analytics/user/{user_id}/summary/` | ✅ | Semua | Menampilkan ringkasan total dan waktu aktivitas per user |
 | `GET` | `/analytics/daily-summary/` | ✅ | Semua | Menampilkan time-series harian total log & user unik |
 
+| `GET` | `/analytics/activity-logs/` | ✅ | Admin | Lihat raw MongoDB activity logs dengan filter dan pagination |
+| `PATCH` | `/analytics/activity-logs/{log_id}/` | ✅ | Admin | Update sebagian field raw activity log MongoDB untuk demo CRUD |
+| `DELETE` | `/analytics/activity-logs/{log_id}/` | ✅ | Admin | Hapus satu raw activity log MongoDB untuk demo CRUD |
+| `GET` | `/analytics/request-logs/` | ✅ | Admin | Lihat raw MongoDB request logs dengan filter dan pagination |
+
 #### Auto Activity Logging Middleware
 Setiap HTTP request ke API secara otomatis terekam ke MongoDB `request_logs` secara asinkron menggunakan daemon thread tanpa menghambat response time API ke user.
 
@@ -413,12 +457,34 @@ test_student_tidak_bisa_buat_course (courses.test_permissions.RBACCreateCourseTe
 test_unauthenticated_tidak_bisa_buat_course (courses.test_permissions.RBACCreateCourseTest) ... ok
 ...
 
-Ran 42 tests in 8.321s
+Ran 88 tests in 131.430s
 
 OK
 ```
 
 > **Catatan**: Test menggunakan SQLite in-memory sehingga tidak membutuhkan koneksi PostgreSQL aktif. Redis dan MongoDB di-mock pada sebagian test yang tidak memerlukan integrasi nyata.
+
+---
+
+## Cara Menjalankan Benchmark
+
+Untuk membuktikan optimasi database dan Redis cache di lingkungan lokal, Anda dapat menjalankan command benchmark bawaan.
+
+### Benchmark API (PostgreSQL + Redis)
+
+```bash
+docker compose exec app python manage.py benchmark_lms --iterations 5
+```
+Perintah ini akan melakukan request pada endpoint Course list, Course search, dan Course detail, lalu menampilkan hasil perbandingan latensi antara _first request_ (cold) dan _warm request_ (cached), serta jumlah query database yang dijalankan. Hasil juga diekspor ke `docs/BENCHMARK_RESULTS.md`.
+
+### Benchmark MongoDB
+
+```bash
+docker compose exec app python manage.py benchmark_mongo --days 7 --limit 10
+
+> **PENTING**: Pastikan Anda berada di direktori `BE-Simple-LMS` (bukan di frontend), dan selalu gunakan prefix `docker compose exec app ...` agar perintah berjalan di dalam container yang memiliki koneksi database yang benar.
+```
+Perintah ini akan menguji performa insert massal ke dalam koleksi analytics MongoDB.
 
 ---
 
@@ -440,8 +506,8 @@ BE-Simple-LMS/
     │   ├── urls.py
     │   └── celery.py
     ├── courses/            # Aplikasi utama (PostgreSQL + Redis + Celery)
-    │   ├── models.py
-    │   ├── api.py
+    │   ├── models.py       # Model Django (Course, Enrollment, Quiz, Comment, dll)
+    │   ├── api.py          # Endpoint API (Auth, Courses, Enrollments, Quizzes, dll)
     │   ├── schemas.py
     │   └── ...
     └── analytics/          # Aplikasi Analytics (MongoDB)
@@ -453,59 +519,3 @@ BE-Simple-LMS/
         └── urls.py         # Routing placeholder
 ```
 
-
----
-
-## Update Penyesuaian Dokumen
-
-Perubahan terbaru difokuskan pada bagian yang sebelumnya belum sepenuhnya lengkap dari dokumen penilaian, tanpa menghapus flow LMS yang sudah ada. Detail teknis lengkap ada di `docs/IMPLEMENTATION_GAP_UPDATES.md` dan `docs/TESTING_AND_BENCHMARK_GUIDE.md`.
-
-### Optimasi Database
-- Seeder default sekarang menyiapkan dataset besar: 100 course, 20 instructor, 200 student, minimal 500 enrollment, dan minimal 1000 komentar.
-- Command benchmark ditambahkan: `python manage.py benchmark_lms --iterations 5`.
-
-### Automated Testing
-- Ditambahkan `.coveragerc` dengan target coverage 80%.
-- Ditambahkan dependency `coverage`, `locust`, dan `factory-boy`.
-- Ditambahkan `locustfile.py` untuk load testing endpoint course dan analytics.
-
-### Redis
-- Ditambahkan cache hit/miss metrics.
-- Endpoint admin baru: `GET /api/v1/cache/metrics` dan `POST /api/v1/cache/metrics/reset`.
-
-### MongoDB
-- Index MongoDB diperluas untuk `activity_logs` dan `request_logs`.
-- Endpoint admin raw logs ditambahkan: `/api/v1/analytics/activity-logs/` dan `/api/v1/analytics/request-logs/`.
-- Activity log mendukung update/delete untuk demo CRUD MongoDB.
-
-### Celery/RabbitMQ
-- RabbitMQ credential dipindahkan ke `.env`.
-- Celery routing ditambahkan untuk queue `emails`, `reports`, `certificates`, dan `maintenance`.
-
-### Auth & Upload
-- Ditambahkan endpoint alias `/auth/sign-in` dan `/auth/token-refresh`.
-- Ditambahkan `/auth/logout` dengan token blacklist di Redis.
-- Upload materi mendukung PDF, dokumen Office, PPT, MP4, dan gambar sesuai `ALLOWED_UPLOAD_EXTENSIONS`.
-
-## Update v3 — Penyesuaian Akhir Dokumen
-
-Versi ini menutup gap teknis yang sebelumnya masih tersisa:
-
-- **Database Optimization**: endpoint lab baseline/optimized tersedia di Swagger pada `/api/v1/lab/...`.
-- **Authentication & Authorization**: tersedia protected alias `/api/v1/secure/courses`, endpoint literal `/api/v1/comments/`, logout + blacklist token, alias `/auth/sign-in`, `/auth/token-refresh`, dan command `make_rsa` untuk RSA key pair jika ingin memakai `JWT_ALGORITHM=RS256`.
-- **Advanced API Features**: `FilterSchema` sudah dipakai, endpoint demo `@paginate(PageNumberPagination)` tersedia di `/api/v1/courses-ninja-pagination`, rate-limit headers sudah ditambahkan, `/api/v2/` sudah tersedia, dan upload materi mempertahankan ekstensi asli file.
-- **Automated Testing**: `.coveragerc`, Locust, Factory Boy factory, smoke test factory, dan GitHub Actions workflow sudah ditambahkan.
-- **Redis**: cache metrics dan write-through detail course sudah tersedia.
-- **MongoDB**: raw logs, CRUD log, indexes, dan command `benchmark_mongo` sudah tersedia.
-- **Message Broker & Async Tasks**: custom queue routing, uploads queue, dead letter queue, dan async task `process_uploaded_material` sudah tersedia.
-
-Perintah tambahan:
-
-```bash
-cd code
-python manage.py make_rsa
-python manage.py benchmark_lms
-python manage.py benchmark_mongo
-coverage run manage.py test && coverage report --fail-under=80
-locust -f locustfile.py --host=http://localhost:8000
-```
