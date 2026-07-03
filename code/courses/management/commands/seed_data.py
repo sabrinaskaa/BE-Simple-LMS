@@ -1,731 +1,323 @@
 import random
+
 from django.contrib.auth.hashers import make_password
-from django.core.management.base import BaseCommand
 from django.contrib.auth.models import Group, User
+from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.db.models import Avg, Count
+
 from courses.models import (
-    Category, Course, CourseMember, CourseContent, CourseReview,
-    CourseSection, Comment, LessonProgress, Wishlist,
+    Category,
+    Comment,
+    Course,
+    CourseContent,
+    CourseMember,
+    CourseReview,
+    CourseSection,
+    LessonProgress,
+    Quiz,
+    QuizQuestion,
+    Wishlist,
 )
 
-
-# =============================================================================
-# Kamus data Indonesia untuk menghasilkan konten yang realistis
-# =============================================================================
-
-FIRST_NAMES = [
-    'Budi', 'Siti', 'Ahmad', 'Dewi', 'Reza',
-    'Putri', 'Andi', 'Rina', 'Hendra', 'Yuli',
-    'Fajar', 'Nisa', 'Dimas', 'Ayu', 'Rizki',
-    'Lestari', 'Wahyu', 'Maya', 'Bagas', 'Citra',
-]
-
-LAST_NAMES = [
-    'Santoso', 'Wijaya', 'Kusuma', 'Rahayu', 'Pratama',
-    'Sari', 'Hidayat', 'Permata', 'Nugroho', 'Lestari',
-    'Wibowo', 'Mahendra', 'Putra', 'Dewi', 'Susanto',
-    'Kurniawan', 'Handoko', 'Utama', 'Saputra', 'Prabowo',
-]
-
-SUBJECTS = [
-    'Pemrograman Web',
-    'Basis Data',
-    'Algoritma dan Struktur Data',
-    'Jaringan Komputer',
-    'Sistem Operasi',
-    'Kecerdasan Buatan',
-    'Pemrograman Mobile',
-    'Keamanan Siber',
-    'Rekayasa Perangkat Lunak',
-    'Pemrograman Python',
-    'Pemrograman Java',
-    'Manajemen Proyek TI',
-    'Analisis dan Desain Sistem',
-    'Komputasi Awan',
-    'Data Mining',
-    'Statistika',
-    'Matematika Diskrit',
-    'Arsitektur Komputer',
-    'Grafika Komputer',
-    'Interaksi Manusia Komputer',
-]
-
-CONTENT_PREFIXES = [
-    'Pengantar',
-    'Konsep Dasar',
-    'Praktikum',
-    'Latihan',
-    'Kuis',
-    'Modul',
-    'Materi',
-    'Diskusi',
-    'Proyek',
-    'Tugas',
-]
-
-CONTENT_TOPICS = [
-    'Variabel dan Tipe Data',
-    'Struktur Kontrol',
-    'Fungsi dan Prosedur',
-    'Array dan List',
-    'Object Oriented Programming',
-    'Database Design',
-    'Query SQL',
-    'Normalisasi Database',
-    'REST API',
-    'Autentikasi dan Otorisasi',
-    'Deployment Aplikasi',
-    'Unit Testing',
-    'Debugging dan Profiling',
-    'Optimasi Kode',
-    'Git dan Version Control',
-    'Docker dan Containerisasi',
-    'Arsitektur Microservices',
-    'Design Pattern',
-    'Clean Code',
-    'Dokumentasi API',
-]
-
-COMMENTS = [
-    'Materi ini sangat membantu, terima kasih!',
-    'Apakah ada referensi tambahan untuk topik ini?',
-    'Saya belum paham bagian ini, bisa dijelaskan lagi?',
-    'Keren sekali materinya, langsung saya coba praktikkan.',
-    'Tugas ini cukup menantang tapi sangat bermanfaat!',
-    'Mohon bantuannya untuk soal ini, sudah dicoba tapi masih bingung.',
-    'Sudah dicoba tapi masih error, kira-kira kenapa ya?',
-    'Terima kasih penjelasannya, sekarang sudah lebih jelas.',
-    'Apakah boleh menggunakan library lain selain yang disebutkan?',
-    'Saya setuju dengan pendapat teman di atas.',
-    'Kapan deadline pengumpulan tugasnya?',
-    'Boleh minta contoh kode yang sudah selesai sebagai referensi?',
-    'Bagian ini yang paling susah menurut saya, perlu penjelasan lebih.',
-    'Alhamdulillah, sudah berhasil mengerjakan!',
-    'Materinya sangat relevan dengan kebutuhan industri saat ini.',
-    'Apakah ada video penjelasan tambahan untuk materi ini?',
-    'Terima kasih atas feedback-nya, sangat membantu perbaikan.',
-    'Sudah saya coba ulang dan berhasil, terima kasih!',
-    'Materinya padat dan informatif, suka sekali gaya penjelasannya.',
-    'Ada yang bisa bantu explain perbedaannya dengan konsep sebelumnya?',
-]
-
-REVIEW_TEXTS = [
-    'Materi sangat lengkap dan mudah dipahami. Sangat direkomendasikan!',
-    'Instruktur menjelaskan dengan sangat jelas dan sabar.',
-    'Course yang bagus untuk pemula, step by step sangat terstruktur.',
-    'Kurang update dengan teknologi terbaru, tapi dasarnya bagus.',
-    'Sangat membantu karir saya, langsung bisa dipraktikkan.',
-    'Penjelasan terlalu cepat di beberapa bagian.',
-    'Konten berkualitas tinggi, worth every penny!',
-    'Latihan soal sangat membantu pemahaman materi.',
-    'Perlu lebih banyak contoh kasus nyata.',
-    'Instruktur sangat responsif menjawab pertanyaan.',
-    'Struktur kursus yang baik, dari dasar hingga lanjutan.',
-    'Banyak ilmu baru yang saya dapatkan dari sini.',
-    'Rekomendasikan untuk siapa saja yang ingin belajar dari nol.',
-    'Video berkualitas baik dan audio jelas.',
-    'Beberapa materi bisa lebih diperdalam.',
-]
-
-SECTION_TITLES = [
-    'Pendahuluan',
-    'Materi Dasar',
-    'Konsep Inti',
-    'Praktik Langsung',
-    'Studi Kasus',
-    'Proyek Akhir',
-    'Evaluasi dan Kuis',
-    'Materi Lanjutan',
-    'Tips dan Trik',
-    'Penutup dan Ringkasan',
-]
-
-PRICES = [50000, 75000, 100000, 125000, 150000, 200000, 250000]
+FIRST_NAMES = ['Budi', 'Siti', 'Ahmad', 'Dewi', 'Reza', 'Putri', 'Andi', 'Rina', 'Hendra', 'Yuli']
+LAST_NAMES = ['Santoso', 'Wijaya', 'Kusuma', 'Rahayu', 'Pratama', 'Sari', 'Hidayat', 'Permata', 'Nugroho', 'Lestari']
 LEVELS = ['beginner', 'intermediate', 'advanced']
-STATUSES = ['draft', 'published', 'published', 'published', 'archived']  # lebih banyak published
+PRICES = [50000, 75000, 100000, 125000, 150000, 200000]
+
+COURSE_DATA = [
+    ('Pemrograman Web Modern', 'Pemrograman', 'Belajar HTML, CSS, JavaScript, React, dan REST API dari dasar.'),
+    ('Backend Python dengan Django', 'Pemrograman', 'Membangun backend API, autentikasi JWT, dan integrasi database.'),
+    ('Basis Data Relasional', 'Basis Data', 'Desain database, normalisasi, SQL, dan optimasi query.'),
+    ('Dasar Keamanan Siber', 'Jaringan & Keamanan', 'Konsep keamanan aplikasi, autentikasi, hashing, dan proteksi data.'),
+    ('Machine Learning untuk Pemula', 'Data Science', 'Pipeline data, model supervised learning, evaluasi, dan deployment sederhana.'),
+    ('DevOps dengan Docker', 'DevOps & Cloud', 'Container, docker compose, environment variable, dan deployment aplikasi.'),
+]
+
+SECTION_TITLES = ['Pendahuluan', 'Materi Inti', 'Praktik Terarah', 'Evaluasi']
+YOUTUBE_LINKS = [
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    'https://www.youtube.com/watch?v=ysz5S6PUM-U',
+    'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+]
+
+QUIZ_TEMPLATES = [
+    ('Apa tujuan utama materi pada section ini?', ['Memahami konsep inti', 'Menghapus database', 'Menurunkan keamanan', 'Mengabaikan dokumentasi'], 'Memahami konsep inti'),
+    ('Apa kebiasaan belajar yang paling tepat sebelum kuis?', ['Membaca ulang materi', 'Menebak semua jawaban', 'Melewati semua lesson', 'Menghapus akun'], 'Membaca ulang materi'),
+    ('Nilai minimum kelulusan kuis pada sistem ini adalah?', ['75', '50', '25', '1000'], '75'),
+    ('Apa fungsi question bank?', ['Menyediakan kumpulan soal', 'Menghapus course', 'Mengganti instructor', 'Membuka semua section otomatis'], 'Menyediakan kumpulan soal'),
+    ('Mengapa urutan lesson penting?', ['Agar pembelajaran bertahap', 'Agar siswa melewati materi', 'Agar kuis tidak perlu dikerjakan', 'Agar file tidak bisa diupload'], 'Agar pembelajaran bertahap'),
+]
 
 
 class Command(BaseCommand):
-    help = 'Seed database dengan data dummy untuk LMS'
+    help = 'Seed database Simple LMS dengan course, section, artikel lesson, quiz, dan question bank.'
 
     def handle(self, *args, **options):
-        # Seed random agar hasil konsisten setiap kali dijalankan
         random.seed(42)
+        self.stdout.write(self.style.HTTP_INFO('=' * 60))
+        self.stdout.write(self.style.HTTP_INFO('  Seeding Data - Simple LMS Rich Course Flow'))
+        self.stdout.write(self.style.HTTP_INFO('=' * 60))
 
-        self.stdout.write(self.style.HTTP_INFO('=' * 55))
-        self.stdout.write(self.style.HTTP_INFO('  Seeding Data - Simple LMS'))
-        self.stdout.write(self.style.HTTP_INFO('=' * 55))
-
-        groups = self._seed_groups()
-        teachers = self._seed_teachers(groups['instructor'])
-        students = self._seed_students(groups['student'])
-        self._seed_categories()
-        courses = self._seed_courses(teachers)
-        members = self._seed_members(courses, students)
-        contents = self._seed_contents(courses)
-        self._seed_sections(courses, contents)
-        self._seed_comments(contents, members)
-        self._seed_reviews(courses, members, students)
-        self._seed_wishlist(courses, students)
-        self._seed_lesson_progress(members, contents)
+        with transaction.atomic():
+            groups = self._seed_groups()
+            teachers = self._seed_teachers(groups['instructor'])
+            students = self._seed_students(groups['student'])
+            categories = self._seed_categories()
+            courses = self._seed_courses(teachers, categories)
+            self._seed_curriculum(courses)
+            members = self._seed_members(courses, students)
+            self._seed_reviews(courses, members)
+            self._seed_wishlist(courses, students)
+            self._seed_comments(courses, members)
+            self._seed_progress_demo(courses, students)
 
         self._print_summary()
-
         self.stdout.write('')
-        self.stdout.write(self.style.SUCCESS('Seeding selesai! Sekarang coba:'))
-        self.stdout.write('  http://localhost:8000/api/v1/docs       ← Swagger UI')
-        self.stdout.write('  http://localhost:8000/admin/            ← manajemen data')
-        self.stdout.write('')
-        self.stdout.write(self.style.SUCCESS('Akun demo yang tersedia:'))
+        self.stdout.write(self.style.SUCCESS('Seeding selesai!'))
         self.stdout.write('  Admin     : admin / admin123')
-        self.stdout.write('  Instructor: dosen01 - dosen20 / password123')
-        self.stdout.write('  Student   : mhs001 - mhs080 / password123')
+        self.stdout.write('  Instructor: dosen01 - dosen06 / password123')
+        self.stdout.write('  Student   : mhs001 - mhs020 / password123')
 
-    # -------------------------------------------------------------------------
-    # Step 0: Buat Django Groups untuk RBAC (Admin, Instructor, Student)
-    # -------------------------------------------------------------------------
     def _seed_groups(self):
-        self.stdout.write('\n[0/9] Membuat Django Groups (Admin, Instructor, Student)...')
-
-        admin_group, admin_created = Group.objects.get_or_create(name='Admin')
-        instructor_group, instructor_created = Group.objects.get_or_create(name='Instructor')
-        student_group, student_created = Group.objects.get_or_create(name='Student')
-
-        if not User.objects.filter(username='admin').exists():
-            admin_user = User.objects.create_superuser(
-                username='admin',
-                email='admin@lms.ac.id',
-                password='admin123',
-                first_name='Super',
-                last_name='Admin',
-            )
+        self.stdout.write('\n[1/10] Menyiapkan role...')
+        admin_group, _ = Group.objects.get_or_create(name='Admin')
+        instructor_group, _ = Group.objects.get_or_create(name='Instructor')
+        student_group, _ = Group.objects.get_or_create(name='Student')
+        admin_user, created = User.objects.get_or_create(
+            username='admin',
+            defaults={
+                'email': 'admin@lms.ac.id',
+                'first_name': 'Super',
+                'last_name': 'Admin',
+                'is_staff': True,
+                'is_superuser': True,
+                'password': make_password('admin123'),
+            },
+        )
+        if created:
             admin_user.groups.add(admin_group)
-            self.stdout.write('  → Superuser "admin" dibuat (password: admin123)')
-        else:
-            self.stdout.write('  → Superuser "admin" sudah ada (skip)')
+        return {'admin': admin_group, 'instructor': instructor_group, 'student': student_group}
 
-        statuses = [
-            f'Admin({"baru" if admin_created else "sudah ada"})',
-            f'Instructor({"baru" if instructor_created else "sudah ada"})',
-            f'Student({"baru" if student_created else "sudah ada"})',
-        ]
-        self.stdout.write(f'  → Groups: {", ".join(statuses)}')
-
-        return {
-            'admin': admin_group,
-            'instructor': instructor_group,
-            'student': student_group,
-        }
-
-    # -------------------------------------------------------------------------
-    # Step 1: Buat 20 User pengajar
-    # -------------------------------------------------------------------------
     def _seed_teachers(self, instructor_group):
-        self.stdout.write('\n[1/9] Membuat pengajar (dosen01 - dosen20)...')
-
-        existing = set(
-            User.objects.filter(username__startswith='dosen')
-            .values_list('username', flat=True)
-        )
-
-        to_create = []
-        for i in range(1, 21):
+        self.stdout.write('[2/10] Menyiapkan instructor...')
+        teachers = []
+        for i in range(1, 7):
             username = f'dosen{i:02d}'
-            if username not in existing:
-                fname = FIRST_NAMES[(i - 1) % len(FIRST_NAMES)]
-                lname = LAST_NAMES[(i - 1) % len(LAST_NAMES)]
-                to_create.append(User(
-                    username=username,
-                    first_name=fname,
-                    last_name=lname,
-                    email=f'{username}@univ.ac.id',
-                    is_staff=False,
-                    password=make_password('password123'),
-                ))
-
-        if to_create:
-            User.objects.bulk_create(to_create, ignore_conflicts=True)
-
-        teachers = list(User.objects.filter(username__startswith='dosen'))
-
-        already_in_group = set(
-            instructor_group.user_set.filter(username__startswith='dosen')
-            .values_list('id', flat=True)
-        )
-        to_assign = [t for t in teachers if t.id not in already_in_group]
-        if to_assign:
-            instructor_group.user_set.add(*to_assign)
-            self.stdout.write(f'  → {len(to_assign)} dosen di-assign ke group "Instructor"')
-
-        self.stdout.write(f'  → {len(teachers)} pengajar tersedia')
+            user, _ = User.objects.get_or_create(
+                username=username,
+                defaults={
+                    'email': f'{username}@univ.ac.id',
+                    'first_name': FIRST_NAMES[(i - 1) % len(FIRST_NAMES)],
+                    'last_name': LAST_NAMES[(i - 1) % len(LAST_NAMES)],
+                    'password': make_password('password123'),
+                },
+            )
+            user.groups.add(instructor_group)
+            teachers.append(user)
         return teachers
 
-    # -------------------------------------------------------------------------
-    # Step 2: Buat 80 User mahasiswa
-    # -------------------------------------------------------------------------
     def _seed_students(self, student_group):
-        self.stdout.write('\n[2/9] Membuat mahasiswa (mhs001 - mhs080)...')
-
-        existing = set(
-            User.objects.filter(username__startswith='mhs')
-            .values_list('username', flat=True)
-        )
-
-        to_create = []
-        for i in range(1, 81):
+        self.stdout.write('[3/10] Menyiapkan student...')
+        students = []
+        for i in range(1, 21):
             username = f'mhs{i:03d}'
-            if username not in existing:
-                to_create.append(User(
-                    username=username,
-                    first_name=random.choice(FIRST_NAMES),
-                    last_name=random.choice(LAST_NAMES),
-                    email=f'{username}@student.univ.ac.id',
-                    password=make_password('password123'),
-                ))
-
-        if to_create:
-            User.objects.bulk_create(to_create, ignore_conflicts=True)
-
-        students = list(User.objects.filter(username__startswith='mhs'))
-
-        already_in_group = set(
-            student_group.user_set.filter(username__startswith='mhs')
-            .values_list('id', flat=True)
-        )
-        to_assign = [s for s in students if s.id not in already_in_group]
-        if to_assign:
-            student_group.user_set.add(*to_assign)
-            self.stdout.write(f'  → {len(to_assign)} mahasiswa di-assign ke group "Student"')
-
-        self.stdout.write(f'  → {len(students)} mahasiswa tersedia')
+            user, _ = User.objects.get_or_create(
+                username=username,
+                defaults={
+                    'email': f'{username}@student.univ.ac.id',
+                    'first_name': random.choice(FIRST_NAMES),
+                    'last_name': random.choice(LAST_NAMES),
+                    'password': make_password('password123'),
+                },
+            )
+            user.groups.add(student_group)
+            students.append(user)
         return students
 
-    # -------------------------------------------------------------------------
-    # Step 2.5: Buat Categories
-    # -------------------------------------------------------------------------
     def _seed_categories(self):
-        self.stdout.write('\n[2.5/9] Membuat kategori course...')
-        CATEGORIES = [
-            ('Pemrograman', 'Kursus tentang bahasa pemrograman dan pengembangan software'),
-            ('Basis Data', 'Kursus manajemen dan desain database'),
-            ('Jaringan & Keamanan', 'Kursus jaringan komputer dan keamanan siber'),
-            ('Data Science', 'Kursus analisis data, machine learning, dan AI'),
-            ('DevOps & Cloud', 'Kursus deployment, containerisasi, dan cloud computing'),
+        self.stdout.write('[4/10] Menyiapkan kategori...')
+        rows = [
+            ('Pemrograman', 'Kursus pengembangan aplikasi dan bahasa pemrograman.'),
+            ('Basis Data', 'Kursus desain dan manajemen database.'),
+            ('Jaringan & Keamanan', 'Kursus jaringan komputer dan keamanan siber.'),
+            ('Data Science', 'Kursus analisis data, AI, dan machine learning.'),
+            ('DevOps & Cloud', 'Kursus deployment, container, dan cloud computing.'),
         ]
-        for name, desc in CATEGORIES:
-            Category.objects.get_or_create(name=name, defaults={'description': desc})
-        self.stdout.write(f'  → {Category.objects.count()} kategori tersedia')
+        categories = {}
+        for name, desc in rows:
+            cat, _ = Category.objects.get_or_create(name=name, defaults={'description': desc})
+            categories[name] = cat
+        return categories
 
-    # -------------------------------------------------------------------------
-    # Step 3: Buat 100 Course
-    # -------------------------------------------------------------------------
-    def _seed_courses(self, teachers):
-        self.stdout.write('\n[3/9] Membuat 100 mata kuliah...')
-
-        categories = list(Category.objects.all())
-        existing_count = Course.objects.count()
-        to_create = []
-
-        for i in range(existing_count, 100):
-            subject = SUBJECTS[i % len(SUBJECTS)]
-            kelas_idx = i // len(SUBJECTS)
-            name = subject if kelas_idx == 0 else f'{subject} - Kelas {chr(65 + kelas_idx - 1)}'
-            to_create.append(Course(
+    def _seed_courses(self, teachers, categories):
+        self.stdout.write('[5/10] Menyiapkan course published...')
+        courses = []
+        for idx, (name, category_name, description) in enumerate(COURSE_DATA):
+            course, created = Course.objects.get_or_create(
                 name=name,
-                description=(
-                    f'Mata kuliah {subject} membahas konsep dasar hingga lanjutan '
-                    f'dengan pendekatan teori dan praktikum. Mahasiswa akan mampu '
-                    f'menerapkan ilmu ini di dunia kerja.'
-                ),
-                price=random.choice(PRICES),
-                teacher=random.choice(teachers),
-                level=random.choice(LEVELS),
-                status=random.choice(STATUSES),
-                category=random.choice(categories) if categories else None,
-            ))
-
-        if to_create:
-            Course.objects.bulk_create(to_create, batch_size=500)
-
-        courses = list(Course.objects.all()[:100])
-        self.stdout.write(f'  → {Course.objects.count()} mata kuliah tersedia')
+                defaults={
+                    'description': description,
+                    'price': PRICES[idx % len(PRICES)],
+                    'teacher': teachers[idx % len(teachers)],
+                    'category': categories.get(category_name),
+                    'level': LEVELS[idx % len(LEVELS)],
+                    'status': 'published',
+                },
+            )
+            if not created:
+                course.description = description
+                course.teacher = teachers[idx % len(teachers)]
+                course.category = categories.get(category_name)
+                course.status = 'published'
+                course.save(update_fields=['description', 'teacher', 'category', 'status'])
+            courses.append(course)
         return courses
 
-    # -------------------------------------------------------------------------
-    # Step 4: Buat 500 CourseMember
-    # -------------------------------------------------------------------------
+    def _seed_curriculum(self, courses):
+        self.stdout.write('[6/10] Menyiapkan section, artikel lesson, quiz, dan question bank...')
+        for course in courses:
+            for s_idx, section_title in enumerate(SECTION_TITLES, start=1):
+                section, _ = CourseSection.objects.get_or_create(
+                    course=course,
+                    order=s_idx,
+                    defaults={'title': section_title},
+                )
+                if section.title != section_title:
+                    section.title = section_title
+                    section.save(update_fields=['title'])
+
+                for l_idx in range(1, 3):
+                    title = f'{section_title}: Materi {l_idx}'
+                    subject = f'{course.name} — {section_title}'
+                    body = (
+                        f'Materi ini membahas {section_title.lower()} pada course {course.name}.\n\n'
+                        'Baca bagian ini seperti artikel pembelajaran. Instructor dapat menulis penjelasan panjang, '
+                        'menyisipkan video, dan menambahkan file pendukung. Student wajib menyelesaikan lesson secara berurutan '
+                        'sebelum membuka section atau kuis berikutnya.\n\n'
+                        'Poin penting:\n'
+                        '- Pahami konsep utama terlebih dahulu.\n'
+                        '- Catat istilah yang belum dipahami.\n'
+                        '- Ulangi materi sebelum mengerjakan kuis.'
+                    )
+                    content, created = CourseContent.objects.get_or_create(
+                        course_id=course,
+                        section=section,
+                        order=l_idx,
+                        defaults={
+                            'name': title,
+                            'description': f'Ringkasan {title}',
+                            'subject': subject,
+                            'body': body,
+                            'video_url': YOUTUBE_LINKS[(s_idx + l_idx) % len(YOUTUBE_LINKS)] if l_idx == 1 else '',
+                            'duration_minutes': random.choice([10, 15, 20, 30]),
+                        },
+                    )
+                    if not created:
+                        content.subject = subject
+                        content.body = body
+                        content.description = f'Ringkasan {title}'
+                        content.save(update_fields=['subject', 'body', 'description'])
+
+                quiz, created = Quiz.objects.get_or_create(
+                    course=course,
+                    section=section,
+                    order=1,
+                    defaults={
+                        'title': f'Kuis {section_title}',
+                        'description': f'Evaluasi singkat untuk section {section_title}. Nilai minimum 75.',
+                        'minimum_score': 75,
+                        'question_count': 3,
+                        'is_active': True,
+                        'created_by': course.teacher,
+                    },
+                )
+                if not created:
+                    quiz.title = f'Kuis {section_title}'
+                    quiz.minimum_score = 75
+                    quiz.question_count = 3
+                    quiz.is_active = True
+                    quiz.save(update_fields=['title', 'minimum_score', 'question_count', 'is_active'])
+
+                if quiz.questions.count() < len(QUIZ_TEMPLATES):
+                    existing_texts = set(quiz.questions.values_list('question_text', flat=True))
+                    for question_text, choices, correct in QUIZ_TEMPLATES:
+                        final_text = f'{question_text} ({section_title})'
+                        if final_text in existing_texts:
+                            continue
+                        QuizQuestion.objects.create(
+                            quiz=quiz,
+                            question_text=final_text,
+                            choices=choices,
+                            correct_answer=correct,
+                            explanation='Pembahasan tersedia setelah evaluasi dari instructor.',
+                            points=1,
+                        )
+
     def _seed_members(self, courses, students):
-        self.stdout.write('\n[4/9] Membuat 500 anggota kelas...')
-
-        existing_count = CourseMember.objects.count()
-        existing_pairs = set(
-            CourseMember.objects.values_list('course_id_id', 'user_id_id')
-        )
-
-        to_create = []
-        attempts = 0
-        target = 500 - existing_count
-
-        while len(to_create) < target and attempts < 10000:
-            attempts += 1
-            course = random.choice(courses)
-            student = random.choice(students)
-            pair = (course.id, student.id)
-
-            if pair not in existing_pairs:
-                existing_pairs.add(pair)
-                role = 'ast' if random.random() < 0.1 else 'std'
-                to_create.append(CourseMember(
-                    course_id=course,
-                    user_id=student,
-                    roles=role,
-                ))
-
-        if to_create:
-            CourseMember.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
-
-        members = list(CourseMember.objects.all())
-        self.stdout.write(f'  → {CourseMember.objects.count()} anggota kelas tersedia')
+        self.stdout.write('[7/10] Menyiapkan enrollment...')
+        members = []
+        for student in students:
+            for course in random.sample(courses, k=min(3, len(courses))):
+                member, _ = CourseMember.objects.get_or_create(course_id=course, user_id=student, defaults={'roles': 'std'})
+                members.append(member)
         return members
 
-    # -------------------------------------------------------------------------
-    # Step 5: Buat 300 CourseContent
-    # -------------------------------------------------------------------------
-    def _seed_contents(self, courses):
-        self.stdout.write('\n[5/9] Membuat 300 konten kelas...')
-
-        existing_count = CourseContent.objects.count()
-        to_create = []
-
-        # Hitung order per course agar tidak duplikat dalam scope tanpa section
-        # Key: course.id → counter
-        course_order_counters = {}
-
-        for i in range(existing_count, 300):
-            course = courses[i % len(courses)]
-            cid = course.id
-
-            # Ambil max order yang sudah ada di DB untuk course ini (scope tanpa section)
-            if cid not in course_order_counters:
-                from django.db.models import Max
-                agg = CourseContent.objects.filter(
-                    course_id=course, section__isnull=True
-                ).aggregate(Max('order'))
-                course_order_counters[cid] = agg['order__max'] or 0
-
-            course_order_counters[cid] += 1
-            order = course_order_counters[cid]
-
-            prefix = CONTENT_PREFIXES[i % len(CONTENT_PREFIXES)]
-            topic = random.choice(CONTENT_TOPICS)
-            to_create.append(CourseContent(
-                name=f'{prefix} {topic}',
-                description=(
-                    f'Materi {prefix.lower()} mengenai {topic.lower()} '
-                    f'dalam konteks {course.name}. '
-                    f'Pelajari konsep ini dengan seksama sebelum mengerjakan latihan.'
-                ),
-                course_id=course,
-                parent_id=None,
-                order=order,
-                duration_minutes=random.choice([15, 20, 30, 45, 60, None]),
-            ))
-
-        if to_create:
-            CourseContent.objects.bulk_create(to_create, batch_size=500)
-
-        contents = list(CourseContent.objects.all()[:300])
-        self.stdout.write(f'  → {CourseContent.objects.count()} konten tersedia')
-        return contents
-
-    # -------------------------------------------------------------------------
-    # Step 6: Buat Sections dan assign contents ke sections
-    # -------------------------------------------------------------------------
-    def _seed_sections(self, courses, contents):
-        self.stdout.write('\n[6/9] Membuat sections dan mengorganisir konten...')
-
-        if CourseSection.objects.count() > 0:
-            self.stdout.write(f'  → {CourseSection.objects.count()} sections sudah ada (skip)')
-            return
-
-        sections_to_create = []
-        # Buat 2-4 sections untuk setiap course (dari 30 course pertama)
-        sample_courses = courses[:30]
-        for course in sample_courses:
-            num_sections = random.randint(2, 4)
-            for j in range(num_sections):
-                sections_to_create.append(CourseSection(
-                    course=course,
-                    title=SECTION_TITLES[j % len(SECTION_TITLES)],
-                    order=j + 1,  # 1-based, konsisten dan tidak duplikat
-                ))
-
-        CourseSection.objects.bulk_create(sections_to_create, batch_size=500)
-
-        # Assign sebagian contents ke sections
-        all_sections = list(CourseSection.objects.all())
-        if not all_sections:
-            return
-
-        # Ambil contents yang belum punya section (hanya dari course yang punya section)
-        section_course_ids = {s.course_id for s in all_sections}
-        unassigned = list(
-            CourseContent.objects.filter(
-                section__isnull=True,
-                course_id__in=section_course_ids,
-            )[:150]
-        )
-
-        # Counter order per (course_id, section_id) agar tidak ada duplikat dalam section
-        section_order_counters = {}
-        to_update = []
-
-        for content in unassigned:
-            course_sections = [s for s in all_sections if s.course_id == content.course_id_id]
-            if not course_sections:
-                continue
-
-            section = random.choice(course_sections)
-            key = (content.course_id_id, section.id)
-            section_order_counters[key] = section_order_counters.get(key, 0) + 1
-
-            content.section = section
-            content.order = section_order_counters[key]  # 1, 2, 3, ... per section
-            to_update.append(content)
-
-        if to_update:
-            CourseContent.objects.bulk_update(to_update, ['section', 'order'], batch_size=200)
-
-        self.stdout.write(f'  → {CourseSection.objects.count()} sections dibuat')
-        self.stdout.write(f'  → {len(to_update)} konten di-assign ke sections')
-
-    # -------------------------------------------------------------------------
-    # Step 7: Buat 1000+ Comment
-    # -------------------------------------------------------------------------
-    def _seed_comments(self, contents, members):
-        self.stdout.write('\n[7/9] Membuat 1000+ komentar...')
-
-        existing_count = Comment.objects.count()
-        target = 1000 - existing_count
-
-        if target <= 0:
-            self.stdout.write(f'  → {Comment.objects.count()} komentar tersedia (skip)')
-            return
-
-        members_by_course = {}
-        for member in members:
-            cid = member.course_id_id
-            if cid not in members_by_course:
-                members_by_course[cid] = []
-            members_by_course[cid].append(member)
-
-        to_create = []
-        fallback_members = members[:20]
-
-        for _ in range(target):
-            content = random.choice(contents)
-            course_members = members_by_course.get(content.course_id_id, fallback_members)
-            member = random.choice(course_members)
-            to_create.append(Comment(
-                content_id=content,
-                member_id=member,
-                comment=random.choice(COMMENTS),
-            ))
-
-        Comment.objects.bulk_create(to_create, batch_size=500)
-        self.stdout.write(f'  → {Comment.objects.count()} komentar tersedia')
-
-    # -------------------------------------------------------------------------
-    # Step 8: Buat Reviews
-    # -------------------------------------------------------------------------
-    def _seed_reviews(self, courses, members, students):
-        self.stdout.write('\n[8/9] Membuat reviews course...')
-
-        if CourseReview.objects.count() > 0:
-            self.stdout.write(f'  → {CourseReview.objects.count()} reviews sudah ada (skip)')
-            return
-
-        # Build set pasangan (course_id, user_id) yang sudah enroll
-        enrolled_pairs = {
-            (m.course_id_id, m.user_id_id): m for m in members
-        }
-
-        to_create = []
-        created_pairs = set()
-        target = 300
-
-        attempts = 0
-        while len(to_create) < target and attempts < 5000:
-            attempts += 1
-            course = random.choice(courses)
-            student = random.choice(students)
-            pair = (course.id, student.id)
-
-            # Hanya buat review jika student sudah enroll dan belum review
-            if pair in enrolled_pairs and pair not in created_pairs:
-                created_pairs.add(pair)
-                to_create.append(CourseReview(
-                    course=course,
-                    user=student,
-                    rating=random.choices([1, 2, 3, 4, 5], weights=[5, 10, 20, 35, 30])[0],
-                    review=random.choice(REVIEW_TEXTS) if random.random() > 0.3 else '',
-                ))
-
-        CourseReview.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
-
-        # Recalculate rating_avg dan total_reviews untuk setiap course
-        reviews_agg = (
-            CourseReview.objects
-            .values('course_id')
-            .annotate(avg=Avg('rating'), total=Count('id'))
-        )
-        to_update = []
-        agg_map = {r['course_id']: r for r in reviews_agg}
+    def _seed_reviews(self, courses, members):
+        self.stdout.write('[8/10] Menyiapkan review...')
+        review_texts = [
+            'Materinya runtut dan enak dibaca.',
+            'Struktur course mirip platform e-learning modern.',
+            'Kuis membantu mengecek pemahaman.',
+            'Butuh lebih banyak contoh, tapi sudah bagus.',
+        ]
+        for member in members[:60]:
+            CourseReview.objects.get_or_create(
+                course=member.course_id,
+                user=member.user_id,
+                defaults={'rating': random.choice([4, 4, 5, 5, 3]), 'review': random.choice(review_texts)},
+            )
+        agg = CourseReview.objects.values('course_id').annotate(avg=Avg('rating'), total=Count('id'))
+        agg_map = {item['course_id']: item for item in agg}
         for course in courses:
-            if course.id in agg_map:
-                course.rating_avg = round(agg_map[course.id]['avg'] or 0, 2)
-                course.total_reviews = agg_map[course.id]['total']
-                to_update.append(course)
+            data = agg_map.get(course.id)
+            course.rating_avg = round(data['avg'] or 0, 2) if data else 0
+            course.total_reviews = data['total'] if data else 0
+            course.save(update_fields=['rating_avg', 'total_reviews'])
 
-        if to_update:
-            Course.objects.bulk_update(to_update, ['rating_avg', 'total_reviews'], batch_size=200)
-
-        self.stdout.write(f'  → {CourseReview.objects.count()} reviews dibuat')
-
-    # -------------------------------------------------------------------------
-    # Step 9: Buat Wishlist
-    # -------------------------------------------------------------------------
     def _seed_wishlist(self, courses, students):
-        self.stdout.write('\n[9/9] Membuat wishlist...')
+        self.stdout.write('[9/10] Menyiapkan wishlist...')
+        for student in students[:12]:
+            for course in random.sample(courses, k=min(2, len(courses))):
+                Wishlist.objects.get_or_create(user=student, course=course)
 
-        if Wishlist.objects.count() > 0:
-            self.stdout.write(f'  → {Wishlist.objects.count()} wishlist sudah ada (skip)')
+    def _seed_comments(self, courses, members):
+        self.stdout.write('[10/10] Menyiapkan komentar lesson...')
+        comments = ['Materinya jelas.', 'Saya akan ulangi sebelum kuis.', 'Contohnya membantu.', 'Bagian ini penting untuk dipahami.']
+        for member in members[:80]:
+            lesson = CourseContent.objects.filter(course_id=member.course_id).order_by('?').first()
+            if lesson:
+                Comment.objects.get_or_create(content_id=lesson, member_id=member, comment=random.choice(comments))
+
+    def _seed_progress_demo(self, courses, students):
+        demo_student = students[0] if students else None
+        if not demo_student:
             return
+        course = courses[0]
+        member, _ = CourseMember.objects.get_or_create(course_id=course, user_id=demo_student, defaults={'roles': 'std'})
+        first_section = CourseSection.objects.filter(course=course).order_by('order').first()
+        if first_section:
+            for lesson in CourseContent.objects.filter(course_id=course, section=first_section).order_by('order'):
+                LessonProgress.objects.get_or_create(member=member, content=lesson, defaults={'is_completed': True})
 
-        to_create = []
-        created_pairs = set()
-        target = 200
-
-        attempts = 0
-        while len(to_create) < target and attempts < 3000:
-            attempts += 1
-            course = random.choice(courses)
-            student = random.choice(students)
-            pair = (student.id, course.id)
-
-            if pair not in created_pairs:
-                created_pairs.add(pair)
-                to_create.append(Wishlist(
-                    user=student,
-                    course=course,
-                ))
-
-        Wishlist.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
-        self.stdout.write(f'  → {Wishlist.objects.count()} wishlist dibuat')
-
-    # -------------------------------------------------------------------------
-    # Step 10: Seed LessonProgress untuk demo student (mhs001)
-    # Agar dashboard terlihat realistis: beberapa course aktif dengan progress bervariasi
-    # -------------------------------------------------------------------------
-    def _seed_lesson_progress(self, members, contents):
-        self.stdout.write('\n[10/10] Membuat lesson progress demo untuk mhs001...')
-
-        if LessonProgress.objects.count() > 0:
-            self.stdout.write(f'  → {LessonProgress.objects.count()} lesson progress sudah ada (skip)')
-            return
-
-        # Cari mhs001
-        try:
-            mhs001 = User.objects.get(username='mhs001')
-        except User.DoesNotExist:
-            self.stdout.write('  → mhs001 tidak ditemukan, skip')
-            return
-
-        # Ambil enrollment mhs001
-        mhs_memberships = list(
-            CourseMember.objects.filter(user_id=mhs001).select_related('course_id')
-        )
-        if not mhs_memberships:
-            self.stdout.write('  → mhs001 tidak memiliki enrollment, skip')
-            return
-
-        to_create = []
-        created_pairs = set()
-
-        for i, member in enumerate(mhs_memberships):
-            course = member.course_id
-            course_contents = [c for c in contents if c.course_id_id == course.id]
-            if not course_contents:
-                continue
-
-            # Variasikan progress: course pertama 100%, sisanya 30-70%
-            if i == 0:
-                # Course pertama: selesai semua (completed)
-                selected = course_contents
-            else:
-                # Course lainnya: selesai sebagian (30-70%)
-                n_complete = max(1, int(len(course_contents) * random.uniform(0.3, 0.7)))
-                selected = course_contents[:n_complete]
-
-            for content in selected:
-                pair = (member.id, content.id)
-                if pair not in created_pairs:
-                    created_pairs.add(pair)
-                    to_create.append(LessonProgress(
-                        member=member,
-                        content=content,
-                        is_completed=True,
-                    ))
-
-        # Tambahkan beberapa progress untuk student lain agar data lebih kaya
-        other_members = [m for m in members if m.user_id_id != mhs001.id][:50]
-        for member in other_members:
-            course = member.course_id
-            course_contents = [c for c in contents if c.course_id_id == course.id]
-            if not course_contents:
-                continue
-            # Tandai 1-3 lesson acak sebagai selesai
-            n = random.randint(1, min(3, len(course_contents)))
-            for content in random.sample(course_contents, n):
-                pair = (member.id, content.id)
-                if pair not in created_pairs:
-                    created_pairs.add(pair)
-                    to_create.append(LessonProgress(
-                        member=member,
-                        content=content,
-                        is_completed=True,
-                    ))
-
-        if to_create:
-            LessonProgress.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
-
-        self.stdout.write(f'  → {LessonProgress.objects.count()} lesson progress dibuat')
-
-    # -------------------------------------------------------------------------
-    # Summary
-    # -------------------------------------------------------------------------
     def _print_summary(self):
         self.stdout.write('')
-        self.stdout.write(self.style.HTTP_INFO('-' * 55))
-        self.stdout.write(self.style.HTTP_INFO('  Ringkasan Data'))
-        self.stdout.write(self.style.HTTP_INFO('-' * 55))
-        self.stdout.write(f'  Group Admin      : {Group.objects.filter(name="Admin").first().user_set.count() if Group.objects.filter(name="Admin").exists() else 0} user')
-        self.stdout.write(f'  Group Instructor : {Group.objects.filter(name="Instructor").first().user_set.count() if Group.objects.filter(name="Instructor").exists() else 0} user')
-        self.stdout.write(f'  Group Student    : {Group.objects.filter(name="Student").first().user_set.count() if Group.objects.filter(name="Student").exists() else 0} user')
-        self.stdout.write(self.style.HTTP_INFO('-' * 55))
-        self.stdout.write(
-            f"  User pengajar   : {User.objects.filter(username__startswith='dosen').count()}"
-        )
-        self.stdout.write(
-            f"  User mahasiswa  : {User.objects.filter(username__startswith='mhs').count()}"
-        )
-        self.stdout.write(f'  Category        : {Category.objects.count()}')
-        self.stdout.write(f'  Course          : {Course.objects.count()}')
-        self.stdout.write(f'  CourseSection   : {CourseSection.objects.count()}')
-        self.stdout.write(f'  CourseMember    : {CourseMember.objects.count()}')
-        self.stdout.write(f'  CourseContent   : {CourseContent.objects.count()}')
-        self.stdout.write(f'  LessonProgress  : {LessonProgress.objects.count()}')
-        self.stdout.write(f'  CourseReview    : {CourseReview.objects.count()}')
-        self.stdout.write(f'  Wishlist        : {Wishlist.objects.count()}')
-        self.stdout.write(f'  Comment         : {Comment.objects.count()}')
-        self.stdout.write(self.style.HTTP_INFO('-' * 55))
+        self.stdout.write(self.style.HTTP_INFO('-' * 60))
+        self.stdout.write(f'  Categories     : {Category.objects.count()}')
+        self.stdout.write(f'  Courses        : {Course.objects.count()}')
+        self.stdout.write(f'  Sections       : {CourseSection.objects.count()}')
+        self.stdout.write(f'  Lessons        : {CourseContent.objects.count()}')
+        self.stdout.write(f'  Quizzes        : {Quiz.objects.count()}')
+        self.stdout.write(f'  Questions      : {QuizQuestion.objects.count()}')
+        self.stdout.write(f'  Enrollments    : {CourseMember.objects.count()}')
+        self.stdout.write(self.style.HTTP_INFO('-' * 60))

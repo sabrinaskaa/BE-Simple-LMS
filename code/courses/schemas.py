@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from ninja import Schema
 
@@ -101,7 +101,7 @@ class CourseIn(Schema):
     image: Optional[str] = ""
     category_id: Optional[int] = None
     level: str = "beginner"
-    status: str = "published"
+    status: str = "draft"
 
 
 class CourseUpdateIn(Schema):
@@ -170,6 +170,8 @@ class ProgressOut(Schema):
 class ContentIn(Schema):
     name: str
     description: str = "-"
+    subject: str = ""
+    body: str = ""
     video_url: Optional[str] = None
     parent_id: Optional[int] = None
     section_id: Optional[int] = None
@@ -181,6 +183,8 @@ class ContentIn(Schema):
 class ContentUpdateIn(Schema):
     name: Optional[str] = None
     description: Optional[str] = None
+    subject: Optional[str] = None
+    body: Optional[str] = None
     video_url: Optional[str] = None
     parent_id: Optional[int] = None
     section_id: Optional[int] = None
@@ -192,6 +196,8 @@ class ContentOut(Schema):
     id: int
     name: str
     description: str
+    subject: str
+    body: str
     video_url: Optional[str] = None
     file_attachment: Optional[str] = None
     course_id: int
@@ -233,7 +239,10 @@ class ContentInSectionOut(Schema):
     id: int
     name: str
     description: str
+    subject: str
     video_url: Optional[str] = None
+    is_locked: bool = False
+    is_completed: bool = False
     order: int
     duration_minutes: Optional[int] = None
 
@@ -245,6 +254,150 @@ class SectionWithLessonsOut(Schema):
     order: int
     total_lessons: int
     lessons: List[ContentInSectionOut]
+
+
+
+
+# QUIZ / QUESTION BANK SCHEMAS
+
+class QuizIn(Schema):
+    title: str
+    description: str = ""
+    section_id: Optional[int] = None
+    order: Optional[int] = None
+    minimum_score: int = 75
+    question_count: int = 5
+    is_active: bool = True
+
+
+class QuizUpdateIn(Schema):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    section_id: Optional[int] = None
+    order: Optional[int] = None
+    minimum_score: Optional[int] = None
+    question_count: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class QuizOut(Schema):
+    id: int
+    course_id: int
+    section_id: Optional[int] = None
+    title: str
+    description: str
+    order: int
+    minimum_score: int
+    question_count: int
+    total_questions: int
+    is_active: bool
+    is_locked: bool = False
+    passed: bool = False
+    can_attempt: bool = True
+    remaining_attempts: int = 2
+    cooldown_until: Optional[datetime] = None
+    message: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class QuizQuestionIn(Schema):
+    question_text: str
+    choices: List[str]
+    correct_answer: str
+    explanation: str = ""
+    points: int = 1
+
+
+class QuizQuestionUpdateIn(Schema):
+    question_text: Optional[str] = None
+    choices: Optional[List[str]] = None
+    correct_answer: Optional[str] = None
+    explanation: Optional[str] = None
+    points: Optional[int] = None
+
+
+class QuizQuestionOut(Schema):
+    id: int
+    quiz_id: int
+    question_text: str
+    choices: List[str]
+    explanation: str = ""
+    points: int
+    created_at: datetime
+
+
+class QuizQuestionBankOut(QuizQuestionOut):
+    correct_answer: str
+
+
+class QuizAttemptQuestionOut(Schema):
+    id: int
+    question_text: str
+    choices: List[str]
+    points: int
+
+
+class QuizAttemptStartOut(Schema):
+    attempt_id: int
+    quiz_id: int
+    quiz_title: str
+    minimum_score: int
+    attempt_number: int
+    questions: List[QuizAttemptQuestionOut]
+
+
+class QuizAnswerIn(Schema):
+    question_id: int
+    selected_answer: str
+
+
+class QuizSubmitIn(Schema):
+    answers: List[QuizAnswerIn]
+
+
+class QuizAttemptResultOut(Schema):
+    attempt_id: int
+    quiz_id: int
+    score: float
+    correct_count: int
+    total_questions: int
+    passed: bool
+    minimum_score: int
+    remaining_attempts: int
+    cooldown_until: Optional[datetime] = None
+    message: str
+
+
+class LearningMapLessonOut(Schema):
+    id: int
+    name: str
+    subject: str
+    section_id: Optional[int] = None
+    order: int
+    duration_minutes: Optional[int] = None
+    is_completed: bool
+    is_locked: bool
+
+
+class LearningMapSectionOut(Schema):
+    id: Optional[int] = None
+    title: str
+    order: int
+    is_locked: bool
+    completed_lessons: int
+    total_lessons: int
+    passed_quizzes: int
+    total_quizzes: int
+    lessons: List[LearningMapLessonOut]
+    quizzes: List[QuizOut]
+
+
+class LearningMapOut(Schema):
+    course_id: int
+    enrollment_id: Optional[int] = None
+    progress_percent: float
+    sections: List[LearningMapSectionOut]
 
 
 # REVIEW SCHEMAS

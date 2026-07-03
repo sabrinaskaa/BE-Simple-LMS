@@ -1,8 +1,34 @@
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils.text import slugify
+from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db.models import Q
+import os
+
+
+def lesson_pdf_upload_path(instance, filename):
+    """
+    Membuat path penyimpanan file PDF materi dengan format:
+        {course_id}-{section_id}-{lesson_id}-{timestamp}-{namafile}.pdf
+
+    Contoh: 3-7-42-20260703141523-intro_materi.pdf
+    File disimpan di: media/lessons/<path_di_atas>
+    """
+    from django.utils import timezone as tz
+
+    # Ambil nama file tanpa ekstensi, paksa ekstensi menjadi .pdf
+    base_name = os.path.splitext(filename)[0]
+    # Ganti karakter tidak aman dengan underscore
+    safe_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name)
+
+    course_id = instance.course_id_id if instance.course_id_id else 0
+    section_id = instance.section_id if instance.section_id else 0
+    lesson_id = instance.pk if instance.pk else 0
+    timestamp = tz.now().strftime("%Y%m%d%H%M%S")
+
+    new_filename = f"{course_id}-{section_id}-{lesson_id}-{timestamp}-{safe_name}.pdf"
+    return os.path.join("lessons", new_filename)
 
 
 class Category(models.Model):
@@ -159,14 +185,21 @@ class CourseSection(models.Model):
 
 class CourseContent(models.Model):
     name = models.CharField("judul konten", max_length=200)
-    description = models.TextField("deskripsi", default='-')
+    description = models.TextField("deskripsi singkat", default='-')
+    subject = models.CharField("subject/subjudul", max_length=220, blank=True, default="")
+    body = models.TextField("isi materi/artikel", blank=True, default="")
     video_url = models.CharField(
         'URL Video',
         max_length=200,
         null=True,
         blank=True
     )
-    file_attachment = models.FileField("File", null=True, blank=True)
+    file_attachment = models.FileField(
+        "File PDF Materi",
+        null=True,
+        blank=True,
+        upload_to=lesson_pdf_upload_path,
+    )
     course_id = models.ForeignKey(
         Course,
         verbose_name="matkul",
@@ -387,3 +420,141 @@ class CoursePrerequisite(models.Model):
         verbose_name = "Prasyarat Course"
         verbose_name_plural = "Prasyarat Course"
         unique_together = ("course", "required_course")
+
+class Quiz(models.Model):
+    """Kuis yang ditempatkan pada course atau section tertentu."""
+    course = models.ForeignKey(
+        Course,
+        verbose_name="matkul",
+        on_delete=models.CASCADE,
+        related_name="quizzes",
+    )
+    section = models.ForeignKey(
+        CourseSection,
+        verbose_name="section",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quizzes",
+    )
+    title = models.CharField("judul kuis", max_length=200)
+    description = models.TextField("deskripsi", blank=True, default="")
+    order = models.IntegerField("urutan", default=1)
+    minimum_score = models.IntegerField(
+        "nilai minimum",
+        default=75,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    question_count = models.IntegerField("jumlah soal per attempt", default=5, validators=[MinValueValidator(1)])
+    is_active = models.BooleanField("aktif", default=True)
+    created_by = models.ForeignKey(
+        User,
+        verbose_name="pembuat",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_quizzes",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.course.name} — {self.title}"
+
+    class Meta:
+        verbose_name = "Kuis"
+        verbose_name_plural = "Kuis"
+        ordering = ["course", "section__order", "order", "id"]
+        indexes = [
+            models.Index(fields=["course", "section", "order"], name="idx_quiz_course_section"),
+            models.Index(fields=["is_active"], name="idx_quiz_is_active"),
+        ]
+
+
+class QuizQuestion(models.Model):
+    """Question bank untuk sebuah kuis. Opsi disimpan sebagai list string di JSONField."""
+    quiz = models.ForeignKey(
+        Quiz,
+        verbose_name="kuis",
+        on_delete=models.CASCADE,
+        related_name="questions",
+    )
+    question_text = models.TextField("pertanyaan")
+    choices = models.JSONField("pilihan jawaban", default=list)
+    correct_answer = models.CharField("kunci jawaban", max_length=255)
+    explanation = models.TextField("pembahasan", blank=True, default="")
+    points = models.IntegerField("poin", default=1, validators=[MinValueValidator(1)])
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.question_text[:80]
+
+    class Meta:
+        verbose_name = "Bank Soal Kuis"
+        verbose_name_plural = "Bank Soal Kuis"
+        ordering = ["quiz", "id"]
+
+
+class QuizAttempt(models.Model):
+    quiz = models.ForeignKey(
+        Quiz,
+        verbose_name="kuis",
+        on_delete=models.CASCADE,
+        related_name="attempts",
+    )
+    member = models.ForeignKey(
+        CourseMember,
+        verbose_name="anggota kelas",
+        on_delete=models.CASCADE,
+        related_name="quiz_attempts",
+    )
+    attempt_number = models.IntegerField("nomor attempt", default=1)
+    score = models.DecimalField("nilai", max_digits=5, decimal_places=2, default=0)
+    passed = models.BooleanField("lulus", default=False)
+    cooldown_until = models.DateTimeField("cooldown sampai", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    def mark_submitted(self, score, passed, cooldown_until=None):
+        self.score = score
+        self.passed = passed
+        self.cooldown_until = cooldown_until
+        self.submitted_at = timezone.now()
+        self.save(update_fields=["score", "passed", "cooldown_until", "submitted_at"])
+
+    def __str__(self):
+        return f"{self.member.user_id.username} — {self.quiz.title} ({self.score})"
+
+    class Meta:
+        verbose_name = "Attempt Kuis"
+        verbose_name_plural = "Attempt Kuis"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["quiz", "member", "created_at"], name="idx_quiz_attempt_member"),
+            models.Index(fields=["cooldown_until"], name="idx_quiz_cooldown"),
+        ]
+
+
+class QuizAttemptAnswer(models.Model):
+    attempt = models.ForeignKey(
+        QuizAttempt,
+        verbose_name="attempt",
+        on_delete=models.CASCADE,
+        related_name="answers",
+    )
+    question = models.ForeignKey(
+        QuizQuestion,
+        verbose_name="pertanyaan",
+        on_delete=models.CASCADE,
+        related_name="attempt_answers",
+    )
+    selected_answer = models.CharField("jawaban student", max_length=255, blank=True, default="")
+    is_correct = models.BooleanField("benar", default=False)
+
+    def __str__(self):
+        return f"{self.attempt_id} — {self.question_id}"
+
+    class Meta:
+        verbose_name = "Jawaban Attempt Kuis"
+        verbose_name_plural = "Jawaban Attempt Kuis"
+        unique_together = ("attempt", "question")

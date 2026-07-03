@@ -1,14 +1,17 @@
 import math
 import mimetypes
 import os
+import random
+from datetime import timedelta
 from typing import Optional
 
 import jwt
 from celery.result import AsyncResult
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group, User
-from django.db import models as db_models
+from django.db import models as db_models, transaction
 from django.db.models import Avg, Count, Q
+from django.utils import timezone
 from django.http import FileResponse
 from ninja import NinjaAPI, UploadedFile, File
 from ninja.errors import HttpError
@@ -26,7 +29,7 @@ from .cache import (
 from .models import (
     Category, Course, CourseMember, CourseContent, CourseReview,
     CourseSection, CoursePublishRequest, CoursePrerequisite,
-    LessonProgress, Wishlist,
+    LessonProgress, Wishlist, Quiz, QuizQuestion, QuizAttempt, QuizAttemptAnswer,
 )
 from .mongo import get_activity_report, get_learning_report, log_activity, log_learning_activity
 from .permissions import require_admin, require_instructor, require_student, is_admin, user_roles
@@ -83,6 +86,17 @@ from .schemas import (
     WishlistOut,
     ChatbotIn,
     ChatbotOut,
+    QuizIn,
+    QuizOut,
+    QuizUpdateIn,
+    QuizQuestionIn,
+    QuizQuestionOut,
+    QuizQuestionBankOut,
+    QuizQuestionUpdateIn,
+    QuizAttemptStartOut,
+    QuizSubmitIn,
+    QuizAttemptResultOut,
+    LearningMapOut,
 )
 from .tasks import (
     export_course_report,
@@ -225,6 +239,8 @@ def serialize_content(content: CourseContent):
         "id": content.id,
         "name": content.name,
         "description": content.description,
+        "subject": content.subject,
+        "body": content.body,
         "video_url": content.video_url,
         "file_attachment": (
             content.file_attachment.url if content.file_attachment else None
@@ -361,9 +377,9 @@ def list_courses(
     if level not in allowed_levels:
         raise HttpError(400, "Level tidak valid. Pilih: beginner, intermediate, advanced")
 
-    allowed_statuses = {"draft", "published", "archived", None}
+    allowed_statuses = {"draft", "pending_review", "published", "archived", None}
     if status not in allowed_statuses:
-        raise HttpError(400, "Status tidak valid. Pilih: draft, published, archived")
+        raise HttpError(400, "Status tidak valid. Pilih: draft, pending_review, published, archived")
 
     page = max(page, 1)
     page_size = max(min(page_size, 100), 1)
@@ -476,15 +492,18 @@ def update_course(request, course_id: int, data: CourseUpdateIn):
     if not is_course_owner_or_admin(request.user, course):
         raise HttpError(403, "Hanya owner course atau admin yang boleh mengedit course")
 
-    # Cek apakah ada field konten yang diubah (bukan status)
-    content_fields_changed = any([
-        data.name is not None,
-        data.description is not None,
-        data.price is not None,
-        data.image is not None,
-        data.category_id is not None,
-        data.level is not None,
-    ])
+    provided_fields = (
+        getattr(data, "model_fields_set", None)
+        or getattr(data, "__fields_set__", set())
+        or set()
+    )
+
+    # Cek apakah ada field konten yang diubah (bukan status).
+    # Pakai provided_fields agar PATCH category_id=null tetap dianggap request valid
+    # untuk mengosongkan kategori course menjadi "Tanpa kategori".
+    content_fields_changed = bool({
+        "name", "description", "price", "image", "category_id", "level"
+    } & set(provided_fields))
 
     if data.name is not None:
         course.name = data.name
@@ -496,8 +515,8 @@ def update_course(request, course_id: int, data: CourseUpdateIn):
         course.price = data.price
     if data.image is not None:
         course.image = data.image
-    if data.category_id is not None:
-        course.category = get_object_or_404(Category, id=data.category_id)
+    if "category_id" in provided_fields:
+        course.category = get_object_or_404(Category, id=data.category_id) if data.category_id is not None else None
     if data.level is not None:
         allowed_levels = {"beginner", "intermediate", "advanced"}
         if data.level not in allowed_levels:
@@ -769,6 +788,8 @@ def create_content(request, course_id: int, data: ContentIn):
     content = CourseContent.objects.create(
         name=data.name,
         description=data.description,
+        subject=data.subject,
+        body=data.body,
         video_url=data.video_url,
         course_id=course,
         parent_id=parent,
@@ -805,6 +826,10 @@ def update_content(request, course_id: int, content_id: int, data: ContentUpdate
         content.name = data.name
     if data.description is not None:
         content.description = data.description
+    if data.subject is not None:
+        content.subject = data.subject
+    if data.body is not None:
+        content.body = data.body
     if data.video_url is not None:
         content.video_url = data.video_url
     if data.parent_id is not None:
@@ -942,6 +967,9 @@ def mark_lesson_complete(request, enrollment_id: int, data: ProgressIn):
         raise HttpError(403, "Anda tidak boleh mengubah progress enrollment milik user lain")
 
     content = get_object_or_404(CourseContent, id=data.content_id, course_id=member.course_id)
+    if not _content_unlocked(member.course_id, member, content):
+        raise HttpError(403, "Selesaikan lesson sebelumnya terlebih dahulu sebelum melanjutkan")
+
     progress, created = LessonProgress.objects.get_or_create(
         member=member,
         content=content,
@@ -954,9 +982,7 @@ def mark_lesson_complete(request, enrollment_id: int, data: ProgressIn):
     log_learning_activity(request.user, member.course_id_id, "lesson_completed", {"content_id": content.id})
     invalidate_dashboard_cache(request.user.id)
 
-    total_content = CourseContent.objects.filter(course_id=member.course_id).count()
-    completed_content = LessonProgress.objects.filter(member=member, is_completed=True).count()
-    if total_content > 0 and completed_content >= total_content:
+    if _course_completed_by_member(member.course_id, member):
         generate_certificate.delay(member.id)
 
     return 201, {
@@ -1045,7 +1071,7 @@ def learning_report(request, limit: int = 20):
 
 # 6. FILE UPLOAD / DOWNLOAD ENDPOINTS
 
-_ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".mp4", ".png", ".jpg", ".jpeg"}
+_ALLOWED_EXTENSIONS = {".pdf"}
 _MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB fallback; dioverride dari settings jika tersedia
 
 
@@ -1064,7 +1090,7 @@ def _validate_upload(uploaded_file: UploadedFile) -> None:
     # Ekstensi
     _, ext = os.path.splitext(uploaded_file.name or "")
     if ext.lower() not in allowed_exts:
-        raise HttpError(400, f"Tipe file tidak diizinkan. Ekstensi yang boleh: {', '.join(sorted(allowed_exts))}")
+        raise HttpError(400, "Hanya file PDF yang diizinkan untuk materi kelas.")
 
 
 @api.post(
@@ -1085,7 +1111,12 @@ def upload_content_file(request, course_id: int, content_id: int, file: Uploaded
 
     _validate_upload(file)
 
-    content.file_attachment.save(file.name, file, save=True)
+    # Pastikan nama file yang diterima berekstensi .pdf
+    original_name = file.name or "materi"
+    base_name = os.path.splitext(original_name)[0]
+    save_name = base_name + ".pdf"
+
+    content.file_attachment.save(save_name, file, save=True)
     log_activity(request.user, "upload_content_file", {"course_id": course_id, "content_id": content_id})
     return {
         "content_id": content.id,
@@ -1093,6 +1124,43 @@ def upload_content_file(request, course_id: int, content_id: int, file: Uploaded
         "url": request.build_absolute_uri(content.file_attachment.url),
         "size": file.size if hasattr(file, 'size') else None,
     }
+
+
+@api.delete(
+    "/courses/{course_id}/content/{content_id}/file",
+    auth=api_auth,
+    response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Files"],
+    summary="Hapus file materi PDF dari lesson (Instructor/Admin)",
+)
+def delete_content_file(request, course_id: int, content_id: int):
+    course = Course.objects.select_related("teacher").filter(id=course_id).first()
+    if course is None:
+        raise HttpError(404, "Course tidak ditemukan")
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh menghapus file")
+
+    content = get_object_or_404(CourseContent, id=content_id, course_id=course)
+
+    if not content.file_attachment:
+        raise HttpError(404, "Tidak ada file yang terpasang pada lesson ini")
+
+    # Hapus file fisik dari disk
+    file_path = content.file_attachment.path
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+    # Kosongkan field di database
+    content.file_attachment.delete(save=False)
+    content.file_attachment = None
+    content.save(update_fields=["file_attachment"])
+
+    log_activity(
+        request.user,
+        "delete_content_file",
+        {"course_id": course_id, "content_id": content_id},
+    )
+    return {"message": "File materi berhasil dihapus"}
 
 
 @api.get(
@@ -1203,6 +1271,7 @@ def list_sections(request, course_id: int):
                     "id": c.id,
                     "name": c.name,
                     "description": c.description,
+                    "subject": c.subject,
                     "video_url": c.video_url,
                     "order": c.order,
                     "duration_minutes": c.duration_minutes,
@@ -1908,600 +1977,666 @@ def remove_prerequisite(request, course_id: int, prereq_id: int):
     return {"message": f"Prerequisite '{name}' berhasil dihapus"}
 
 
+
+
 # =============================================================================
-# 10. CHATBOT ASSISTANT
+# 10. COURSE READER, LOCKING, QUIZ, DAN QUESTION BANK
 # =============================================================================
 
-CHATBOT_STOP_WORDS = {
-    "aku", "saya", "gua", "gw", "ingin", "mau", "pengen", "cari", "carikan",
-    "rekomendasi", "rekomendasikan", "kursus", "course", "kelas", "materi",
-    "belajar", "tentang", "untuk", "yang", "dan", "atau", "dari", "dengan",
-    "pada", "di", "ke", "apa", "itu", "ini", "adalah", "bisa", "dapat",
-    "tolong", "bantu", "halo", "hai", "hello", "selamat", "pagi", "siang",
-    "sore", "malam", "bagaimana", "gimana", "cara", "dong", "ya", "min",
-    "admin", "asisten", "lms", "simple", "ada", "adakah", "punya", "tersedia",
-    "termurah", "murah", "paling", "harga", "termahal", "mahal", "gratis",
-    "free", "terbaik", "rating", "populer", "popular"
-}
+QUIZ_COOLDOWN_MINUTES = 10
+QUIZ_MAX_FAILED_ATTEMPTS = 2
 
 
-def _chatbot_normalize_text(text: str) -> str:
-    import re
-    return re.sub(r"\s+", " ", (text or "").lower()).strip()
-
-
-def _chatbot_extract_keywords(message: str):
-    import re
-
-    normalized = _chatbot_normalize_text(message)
-
-    aliases = {
-        "js": "javascript",
-        "java script": "javascript",
-        "py": "python",
-        "database": "basis data",
-        "db": "basis data",
-        "html": "html",
-        "css": "css",
-    }
-
-    keywords = []
-
-    for alias, canonical in aliases.items():
-        if alias in normalized and canonical not in keywords:
-            keywords.append(canonical)
-
-    words = re.findall(r"[a-zA-Z0-9+#.]+", normalized)
-
-    for word in words:
-        if len(word) <= 2:
-            continue
-        if word in CHATBOT_STOP_WORDS:
-            continue
-        if word not in keywords:
-            keywords.append(word)
-
-    return keywords[:10]
-
-
-def _chatbot_detect_intent(message: str) -> str:
-    normalized = _chatbot_normalize_text(message)
-
-    if any(word in normalized for word in ["termurah", "paling murah", "harga murah", "murah", "budget"]):
-        return "cheapest"
-
-    if any(word in normalized for word in ["termahal", "paling mahal", "harga mahal"]):
-        return "most_expensive"
-
-    if any(word in normalized for word in ["gratis", "free", "tanpa bayar"]):
-        return "free"
-
-    if any(word in normalized for word in ["terbaik", "rating tertinggi", "rating terbaik", "paling bagus"]):
-        return "best_rating"
-
-    if any(word in normalized for word in ["pemula", "beginner", "dasar"]):
-        return "beginner"
-
-    if any(word in normalized for word in ["intermediate", "menengah", "lanjutan"]):
-        return "intermediate"
-
-    if any(word in normalized for word in ["advanced", "mahir"]):
-        return "advanced"
-
-    if any(word in normalized for word in ["rekomendasi", "rekomendasikan", "cocok", "belajar", "kursus", "course", "kelas"]):
-        return "recommendation"
-
-    return "general"
-
-
-def _chatbot_base_courses():
+def _ordered_course_contents(course: Course):
     return (
-        Course.objects
-        .filter(status="published")
-        .select_related("teacher", "category")
-    )
-
-
-def _chatbot_teacher_name(course):
-    teacher = getattr(course, "teacher", None)
-
-    if not teacher:
-        return "-"
-
-    full_name = f"{teacher.first_name} {teacher.last_name}".strip()
-    return full_name or teacher.username
-
-
-def _chatbot_format_price(price):
-    try:
-        return f"Rp {int(price):,}".replace(",", ".")
-    except Exception:
-        return f"Rp {price}"
-
-
-def _chatbot_level_label(level: str) -> str:
-    labels = {
-        "beginner": "Beginner",
-        "intermediate": "Intermediate",
-        "advanced": "Advanced",
-    }
-
-    return labels.get(level, level or "-")
-
-
-def _chatbot_add_course(course_map: dict, course, match_note: str = ""):
-    if not course:
-        return
-
-    course_id = course.id
-
-    if course_id not in course_map:
-        course_map[course_id] = {
-            "course": course,
-            "notes": [],
-            "lessons": [],
-            "sections": [],
-        }
-
-    if match_note and match_note not in course_map[course_id]["notes"]:
-        course_map[course_id]["notes"].append(match_note)
-
-
-def _chatbot_find_courses_by_keywords(keywords):
-    course_map = {}
-
-    if not keywords:
-        return []
-
-    course_query = Q()
-
-    for keyword in keywords:
-        course_query |= (
-            Q(name__icontains=keyword)
-            | Q(description__icontains=keyword)
-            | Q(level__icontains=keyword)
-            | Q(category__name__icontains=keyword)
-            | Q(teacher__username__icontains=keyword)
-            | Q(teacher__first_name__icontains=keyword)
-            | Q(teacher__last_name__icontains=keyword)
-        )
-
-    direct_courses = (
-        _chatbot_base_courses()
-        .filter(course_query)
-        .distinct()
-        .order_by("price", "-rating_avg", "id")[:8]
-    )
-
-    for course in direct_courses:
-        _chatbot_add_course(course_map, course, "Cocok dari nama/deskripsi/kategori course")
-
-    content_query = Q()
-
-    for keyword in keywords:
-        content_query |= (
-            Q(name__icontains=keyword)
-            | Q(description__icontains=keyword)
-            | Q(section__title__icontains=keyword)
-        )
-
-    matched_contents = (
         CourseContent.objects
-        .filter(course_id__status="published")
-        .filter(content_query)
-        .select_related("course_id", "course_id__teacher", "course_id__category", "section")
-        .order_by("course_id__price", "course_id__id", "section__order", "order", "id")[:20]
-    )
-
-    for content in matched_contents:
-        course = content.course_id
-        _chatbot_add_course(course_map, course, "Cocok dari section/lesson di dalam course")
-
-        lesson_name = content.name
-        section_title = content.section.title if content.section else "Tanpa section"
-        lesson_text = f"{section_title} → {lesson_name}"
-
-        if lesson_text not in course_map[course.id]["lessons"]:
-            course_map[course.id]["lessons"].append(lesson_text)
-
-    section_query = Q()
-
-    for keyword in keywords:
-        section_query |= Q(title__icontains=keyword)
-
-    matched_sections = (
-        CourseSection.objects
-        .filter(course__status="published")
-        .filter(section_query)
-        .select_related("course", "course__teacher", "course__category")
-        .order_by("course__price", "course__id", "order", "id")[:20]
-    )
-
-    for section in matched_sections:
-        course = section.course
-        _chatbot_add_course(course_map, course, "Cocok dari nama section")
-
-        if section.title not in course_map[course.id]["sections"]:
-            course_map[course.id]["sections"].append(section.title)
-
-    results = list(course_map.values())
-    results.sort(
-        key=lambda item: (
-            item["course"].price,
-            -float(item["course"].rating_avg),
-            item["course"].id,
+        .filter(course_id=course, parent_id__isnull=True)
+        .select_related("section")
+        .order_by(
+            db_models.F("section__order").asc(nulls_last=True),
+            db_models.F("section_id").asc(nulls_last=True),
+            "order",
+            "id",
         )
     )
 
-    return results[:6]
+
+def _member_for_user(course: Course, user: User):
+    if not getattr(user, "is_authenticated", False):
+        return None
+    return CourseMember.objects.filter(course_id=course, user_id=user).first()
 
 
-def _chatbot_get_db_results(user_message: str):
-    intent = _chatbot_detect_intent(user_message)
-    keywords = _chatbot_extract_keywords(user_message)
-    base_qs = _chatbot_base_courses()
+def _completed_lesson_ids(member: CourseMember) -> set[int]:
+    if member is None:
+        return set()
+    return set(
+        LessonProgress.objects.filter(member=member, is_completed=True)
+        .values_list("content_id", flat=True)
+    )
 
-    keyword_results = _chatbot_find_courses_by_keywords(keywords)
-    keyword_course_ids = [item["course"].id for item in keyword_results]
 
-    if intent == "cheapest":
-        qs = base_qs
+def _passed_quiz_ids(member: CourseMember) -> set[int]:
+    if member is None:
+        return set()
+    return set(
+        QuizAttempt.objects.filter(member=member, passed=True, submitted_at__isnull=False)
+        .values_list("quiz_id", flat=True)
+    )
 
-        if keyword_course_ids:
-            qs = qs.filter(id__in=keyword_course_ids)
 
-        courses = qs.order_by("price", "-rating_avg", "id")[:5]
+def _section_completed(course: Course, member: CourseMember, section: CourseSection | None) -> bool:
+    if member is None:
+        return False
+    completed_ids = _completed_lesson_ids(member)
+    passed_ids = _passed_quiz_ids(member)
+    lessons = CourseContent.objects.filter(course_id=course, section=section, parent_id__isnull=True)
+    quizzes = Quiz.objects.filter(course=course, section=section, is_active=True)
+    lessons_done = all(lesson.id in completed_ids for lesson in lessons)
+    quizzes_done = all(quiz.id in passed_ids for quiz in quizzes)
+    return lessons_done and quizzes_done
 
-        return intent, keywords, [
-            {
-                "course": course,
-                "notes": ["Diurutkan dari harga termurah"],
-                "lessons": [],
-                "sections": [],
-            }
-            for course in courses
-        ]
 
-    if intent == "most_expensive":
-        qs = base_qs
+def _section_unlocked(course: Course, member: CourseMember, section: CourseSection | None) -> bool:
+    if member is None:
+        return False
+    if section is None:
+        previous_sections = CourseSection.objects.filter(course=course).order_by("order", "id")
+    else:
+        previous_sections = CourseSection.objects.filter(course=course, order__lt=section.order).order_by("order", "id")
+    return all(_section_completed(course, member, prev) for prev in previous_sections)
 
-        if keyword_course_ids:
-            qs = qs.filter(id__in=keyword_course_ids)
 
-        courses = qs.order_by("-price", "-rating_avg", "id")[:5]
+def _content_unlocked(course: Course, member: CourseMember, content: CourseContent) -> bool:
+    if member is None:
+        return False
+    if not _section_unlocked(course, member, content.section):
+        return False
+    completed_ids = _completed_lesson_ids(member)
+    previous_lessons = CourseContent.objects.filter(
+        course_id=course,
+        section=content.section,
+        parent_id__isnull=True,
+        order__lt=content.order,
+    )
+    return all(lesson.id in completed_ids for lesson in previous_lessons)
 
-        return intent, keywords, [
-            {
-                "course": course,
-                "notes": ["Diurutkan dari harga termahal"],
-                "lessons": [],
-                "sections": [],
-            }
-            for course in courses
-        ]
 
-    if intent == "free":
-        qs = base_qs.filter(price=0)
+def _quiz_unlocked(course: Course, member: CourseMember, quiz: Quiz) -> bool:
+    if member is None:
+        return False
+    if not _section_unlocked(course, member, quiz.section):
+        return False
+    completed_ids = _completed_lesson_ids(member)
+    section_lessons = CourseContent.objects.filter(course_id=course, section=quiz.section, parent_id__isnull=True)
+    return all(lesson.id in completed_ids for lesson in section_lessons)
 
-        if keyword_course_ids:
-            qs = qs.filter(id__in=keyword_course_ids)
 
-        courses = qs.order_by("-rating_avg", "id")[:5]
+def _course_completed_by_member(course: Course, member: CourseMember) -> bool:
+    completed_ids = _completed_lesson_ids(member)
+    passed_ids = _passed_quiz_ids(member)
+    lessons = CourseContent.objects.filter(course_id=course, parent_id__isnull=True)
+    quizzes = Quiz.objects.filter(course=course, is_active=True)
+    return all(lesson.id in completed_ids for lesson in lessons) and all(quiz.id in passed_ids for quiz in quizzes)
 
-        return intent, keywords, [
-            {
-                "course": course,
-                "notes": ["Course gratis"],
-                "lessons": [],
-                "sections": [],
-            }
-            for course in courses
-        ]
 
-    if intent == "best_rating":
-        qs = base_qs
-
-        if keyword_course_ids:
-            qs = qs.filter(id__in=keyword_course_ids)
-
-        courses = qs.order_by("-rating_avg", "-total_reviews", "price", "id")[:5]
-
-        return intent, keywords, [
-            {
-                "course": course,
-                "notes": ["Diurutkan dari rating tertinggi"],
-                "lessons": [],
-                "sections": [],
-            }
-            for course in courses
-        ]
-
-    if intent in {"beginner", "intermediate", "advanced"}:
-        level_map = {
-            "beginner": "beginner",
-            "intermediate": "intermediate",
-            "advanced": "advanced",
+def _quiz_attempt_status(quiz: Quiz, member: CourseMember | None) -> dict:
+    now = timezone.now()
+    if member is None:
+        return {
+            "passed": False,
+            "can_attempt": False,
+            "remaining_attempts": 0,
+            "cooldown_until": None,
+            "message": "Anda harus enroll ke course ini terlebih dahulu.",
         }
 
-        qs = base_qs.filter(level=level_map[intent])
-
-        if keyword_course_ids:
-            qs = qs.filter(id__in=keyword_course_ids)
-
-        courses = qs.order_by("price", "-rating_avg", "id")[:5]
-
-        return intent, keywords, [
-            {
-                "course": course,
-                "notes": [f"Level {_chatbot_level_label(course.level)}"],
-                "lessons": [],
-                "sections": [],
-            }
-            for course in courses
-        ]
-
-    if keyword_results:
-        return intent, keywords, keyword_results
-
-    courses = base_qs.order_by("price", "-rating_avg", "id")[:5]
-
-    return intent, keywords, [
-        {
-            "course": course,
-            "notes": ["Course published dari database"],
-            "lessons": [],
-            "sections": [],
+    if QuizAttempt.objects.filter(quiz=quiz, member=member, passed=True, submitted_at__isnull=False).exists():
+        return {
+            "passed": True,
+            "can_attempt": False,
+            "remaining_attempts": 0,
+            "cooldown_until": None,
+            "message": "Anda sudah lulus kuis ini.",
         }
-        for course in courses
-    ]
 
-
-def _chatbot_format_course_item(item, index: int = 1):
-    course = item["course"]
-    category_name = course.category.name if course.category else "Tanpa kategori"
-    teacher_name = _chatbot_teacher_name(course)
-    description = (course.description or "-").replace("\n", " ").strip()
-
-    if len(description) > 140:
-        description = description[:140] + "..."
-
-    text = (
-        f"{index}. **{course.name}**\n"
-        f"   - Level: {_chatbot_level_label(course.level)}\n"
-        f"   - Kategori: {category_name}\n"
-        f"   - Harga: {_chatbot_format_price(course.price)}\n"
-        f"   - Instruktur: {teacher_name}\n"
-        f"   - Rating: {course.rating_avg} / 5.0 dari {course.total_reviews} review\n"
-        f"   - Deskripsi: {description}"
+    blocking = (
+        QuizAttempt.objects
+        .filter(quiz=quiz, member=member, passed=False, cooldown_until__gt=now)
+        .order_by("-cooldown_until")
+        .first()
     )
+    if blocking:
+        return {
+            "passed": False,
+            "can_attempt": False,
+            "remaining_attempts": 0,
+            "cooldown_until": blocking.cooldown_until,
+            "message": "Anda bisa menelusuri ulang materi-materi sebelumnya sebelum memulai kembali.",
+        }
 
-    if item.get("sections"):
-        text += f"\n   - Section terkait: {', '.join(item['sections'][:3])}"
-
-    if item.get("lessons"):
-        text += f"\n   - Materi/lesson terkait: {', '.join(item['lessons'][:4])}"
-
-    if item.get("notes"):
-        text += f"\n   - Alasan cocok: {', '.join(item['notes'][:2])}"
-
-    return text
-
-
-def _chatbot_build_db_answer(user_message: str, intent: str, keywords, results):
-    if not results:
-        if intent == "free":
-            return "Saat ini belum ada course gratis yang berstatus **published** di database."
-
-        return "Saat ini belum ada course published yang cocok di database LMS."
-
-    course_lines = [
-        _chatbot_format_course_item(item, index=i + 1)
-        for i, item in enumerate(results[:5])
-    ]
-
-    course_text = "\n\n".join(course_lines)
-
-    if intent == "cheapest":
-        first = results[0]["course"]
-
-        opening = (
-            "Berdasarkan data course **published** di database, course termurah saat ini adalah "
-            f"**{first.name}** dengan harga **{_chatbot_format_price(first.price)}**."
-        )
-
-        if len(results) > 1:
-            opening += "\n\nBerikut urutan course dari yang paling murah:"
-
-        return f"{opening}\n\n{course_text}"
-
-    if intent == "most_expensive":
-        first = results[0]["course"]
-
-        return (
-            "Berdasarkan data course **published** di database, course termahal saat ini adalah "
-            f"**{first.name}** dengan harga **{_chatbot_format_price(first.price)}**.\n\n"
-            f"{course_text}"
-        )
-
-    if intent == "free":
-        return f"Saya menemukan course gratis berikut dari database:\n\n{course_text}"
-
-    if intent == "best_rating":
-        return f"Berikut course dengan rating terbaik berdasarkan database:\n\n{course_text}"
-
-    if intent in {"beginner", "intermediate", "advanced"}:
-        return (
-            f"Berikut course level {_chatbot_level_label(results[0]['course'].level)} "
-            f"yang tersedia di database:\n\n{course_text}"
-        )
-
-    if keywords:
-        keyword_text = ", ".join(keywords[:5])
-
-        return (
-            f"Saya mencocokkan pertanyaan Anda dengan database menggunakan kata kunci "
-            f"**{keyword_text}**.\n\n"
-            f"Hasil yang paling relevan:\n\n{course_text}"
-        )
-
-    return f"Berikut beberapa course published yang tersedia di database LMS:\n\n{course_text}"
-
-
-def _chatbot_course_context_for_ai(results):
-    if not results:
-        return "Tidak ada course published yang cocok."
-
-    lines = []
-
-    for item in results[:6]:
-        course = item["course"]
-        category_name = course.category.name if course.category else "Tanpa kategori"
-        teacher_name = _chatbot_teacher_name(course)
-        lessons = "; ".join(item.get("lessons", [])[:5]) or "-"
-        sections = "; ".join(item.get("sections", [])[:5]) or "-"
-        description = (course.description or "-").replace("\n", " ")[:220]
-
-        lines.append(
-            f"- {course.name} | Level: {_chatbot_level_label(course.level)} | "
-            f"Kategori: {category_name} | Harga: {_chatbot_format_price(course.price)} | "
-            f"Instruktur: {teacher_name} | Rating: {course.rating_avg} | "
-            f"Review: {course.total_reviews} | Section cocok: {sections} | "
-            f"Lesson cocok: {lessons} | Deskripsi: {description}"
-        )
-
-    return "\n".join(lines)
-
-
-def _chatbot_call_gemini(user_message: str, db_answer: str, db_context: str):
-    import json
-    import socket
-    import urllib.error
-    import urllib.request
-
-    gemini_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-
-    if not gemini_api_key:
-        return None, "GEMINI_API_KEY belum dikonfigurasi"
-
-    if gemini_api_key.lower() in {
-        "none",
-        "null",
-        "changeme",
-        "your-api-key",
-        "isi-api-key-di-sini",
-    }:
-        return None, "GEMINI_API_KEY masih placeholder"
-
-    model_names = []
-    primary_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
-    fallback_models = os.environ.get(
-        "GEMINI_FALLBACK_MODELS",
-        "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash",
-    )
-
-    if primary_model:
-        model_names.append(primary_model)
-
-    model_names.extend([
-        model.strip()
-        for model in fallback_models.split(",")
-        if model.strip()
-    ])
-
-    unique_models = []
-
-    for model_name in model_names:
-        if model_name not in unique_models:
-            unique_models.append(model_name)
-
-    system_instruction = (
-        "Anda adalah asisten Simple LMS. Jawab dalam Bahasa Indonesia. "
-        "Jawaban utama HARUS mengikuti hasil query database yang diberikan backend. "
-        "Jangan mengganti nama course, harga, instruktur, level, section, atau lesson. "
-        "Jangan mengarang course yang tidak ada pada DATABASE_CONTEXT. "
-        "Jika DATABASE_ANSWER sudah cukup, cukup rapikan bahasanya tanpa mengubah fakta.\n\n"
-        f"DATABASE_CONTEXT:\n{db_context}\n\n"
-        f"DATABASE_ANSWER:\n{db_answer}"
-    )
-
-    payload = {
-        "systemInstruction": {
-            "parts": [
-                {
-                    "text": system_instruction
-                }
-            ]
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": user_message
-                    }
-                ],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.1,
-            "topP": 0.8,
-            "maxOutputTokens": 700,
-        },
+    window_start = now - timedelta(minutes=QUIZ_COOLDOWN_MINUTES)
+    failed_recent = QuizAttempt.objects.filter(
+        quiz=quiz,
+        member=member,
+        passed=False,
+        submitted_at__gte=window_start,
+    ).count()
+    remaining = max(0, QUIZ_MAX_FAILED_ATTEMPTS - failed_recent)
+    return {
+        "passed": False,
+        "can_attempt": remaining > 0,
+        "remaining_attempts": remaining,
+        "cooldown_until": None,
+        "message": "" if remaining > 0 else "Anda bisa menelusuri ulang materi-materi sebelumnya sebelum memulai kembali.",
     }
 
-    timeout_seconds = int(os.environ.get("GEMINI_TIMEOUT_SECONDS", "15"))
-    last_error = ""
 
-    for model_name in unique_models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+def _serialize_quiz(quiz: Quiz, member: CourseMember | None = None, locked: bool = False) -> dict:
+    status = _quiz_attempt_status(quiz, member)
+    total_questions = quiz.questions.count()
+    can_attempt = status["can_attempt"] and not locked and quiz.is_active and total_questions > 0
+    message = status["message"]
+    if locked:
+        message = "Selesaikan materi/section sebelumnya terlebih dahulu."
+    elif total_questions == 0:
+        message = "Question bank kuis ini masih kosong."
+    return {
+        "id": quiz.id,
+        "course_id": quiz.course_id,
+        "section_id": quiz.section_id,
+        "title": quiz.title,
+        "description": quiz.description,
+        "order": quiz.order,
+        "minimum_score": quiz.minimum_score,
+        "question_count": quiz.question_count,
+        "total_questions": total_questions,
+        "is_active": quiz.is_active,
+        "is_locked": locked,
+        "passed": status["passed"],
+        "can_attempt": can_attempt,
+        "remaining_attempts": status["remaining_attempts"],
+        "cooldown_until": status["cooldown_until"],
+        "message": message,
+        "created_at": quiz.created_at,
+        "updated_at": quiz.updated_at,
+    }
 
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": gemini_api_key,
-            },
-            method="POST",
-        )
 
-        try:
-            with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
-                data = json.loads(response.read().decode("utf-8"))
+def _serialize_quiz_question(question: QuizQuestion, include_answer: bool = False) -> dict:
+    data = {
+        "id": question.id,
+        "quiz_id": question.quiz_id,
+        "question_text": question.question_text,
+        "choices": question.choices or [],
+        "explanation": question.explanation,
+        "points": question.points,
+        "created_at": question.created_at,
+    }
+    if include_answer:
+        data["correct_answer"] = question.correct_answer
+    return data
 
-            candidates = data.get("candidates") or []
 
-            for candidate in candidates:
-                parts = (candidate.get("content") or {}).get("parts") or []
-                text = "\n".join([
-                    part.get("text", "")
-                    for part in parts
-                ]).strip()
+def _validate_question_payload(data):
+    choices = [str(choice).strip() for choice in (data.choices or []) if str(choice).strip()]
+    if len(choices) < 2:
+        raise HttpError(400, "Minimal pilihan jawaban adalah 2")
+    if data.correct_answer not in choices:
+        raise HttpError(400, "correct_answer harus sama persis dengan salah satu choices")
+    if data.points < 1:
+        raise HttpError(400, "points minimal 1")
+    return choices
 
-                if text:
-                    return text, ""
 
-            last_error = f"Model {model_name} tidak mengembalikan teks"
+def _require_course_learning_access(request, course: Course) -> CourseMember | None:
+    if is_course_owner_or_admin(request.user, course):
+        return _member_for_user(course, request.user)
+    member = _member_for_user(course, request.user)
+    if member is None:
+        raise HttpError(403, "Anda harus enroll ke course ini terlebih dahulu")
+    return member
 
-        except urllib.error.HTTPError as error:
-            raw = error.read().decode("utf-8", errors="ignore")
-            last_error = f"HTTP {error.code}: {raw[:300]}"
 
-            if error.code in [401, 403]:
-                return None, "GEMINI_API_KEY tidak valid atau tidak punya izin"
+@api.get(
+    "/courses/{course_id}/learning-map",
+    auth=api_auth,
+    response={200: LearningMapOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Learning"],
+    summary="Struktur belajar course lengkap dengan status lock lesson dan kuis",
+)
+def course_learning_map(request, course_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    member = _require_course_learning_access(request, course)
+    can_manage = is_course_owner_or_admin(request.user, course)
+    completed_ids = _completed_lesson_ids(member)
+    passed_ids = _passed_quiz_ids(member)
 
-            continue
+    sections = list(CourseSection.objects.filter(course=course).order_by("order", "id"))
+    section_payloads = []
+    for section in sections:
+        section_locked = False if can_manage else not _section_unlocked(course, member, section)
+        lessons = list(CourseContent.objects.filter(course_id=course, section=section, parent_id__isnull=True).order_by("order", "id"))
+        quizzes = list(Quiz.objects.filter(course=course, section=section).order_by("order", "id"))
+        section_payloads.append({
+            "id": section.id,
+            "title": section.title,
+            "order": section.order,
+            "is_locked": section_locked,
+            "completed_lessons": len([lesson for lesson in lessons if lesson.id in completed_ids]),
+            "total_lessons": len(lessons),
+            "passed_quizzes": len([quiz for quiz in quizzes if quiz.id in passed_ids]),
+            "total_quizzes": len([quiz for quiz in quizzes if quiz.is_active]),
+            "lessons": [
+                {
+                    "id": lesson.id,
+                    "name": lesson.name,
+                    "subject": lesson.subject,
+                    "section_id": lesson.section_id,
+                    "order": lesson.order,
+                    "duration_minutes": lesson.duration_minutes,
+                    "is_completed": lesson.id in completed_ids,
+                    "is_locked": False if can_manage else not _content_unlocked(course, member, lesson),
+                }
+                for lesson in lessons
+            ],
+            "quizzes": [
+                _serialize_quiz(quiz, member, locked=False if can_manage else not _quiz_unlocked(course, member, quiz))
+                for quiz in quizzes
+            ],
+        })
 
-        except (urllib.error.URLError, socket.timeout) as error:
-            last_error = f"Koneksi/timeout Gemini: {error}"
-            continue
+    unsectioned_lessons = list(
+        CourseContent.objects.filter(course_id=course, section__isnull=True, parent_id__isnull=True).order_by("order", "id")
+    )
+    unsectioned_quizzes = list(Quiz.objects.filter(course=course, section__isnull=True).order_by("order", "id"))
+    if unsectioned_lessons or unsectioned_quizzes:
+        section_payloads.append({
+            "id": None,
+            "title": "Materi Tambahan",
+            "order": 9999,
+            "is_locked": False if can_manage else not _section_unlocked(course, member, None),
+            "completed_lessons": len([lesson for lesson in unsectioned_lessons if lesson.id in completed_ids]),
+            "total_lessons": len(unsectioned_lessons),
+            "passed_quizzes": len([quiz for quiz in unsectioned_quizzes if quiz.id in passed_ids]),
+            "total_quizzes": len([quiz for quiz in unsectioned_quizzes if quiz.is_active]),
+            "lessons": [
+                {
+                    "id": lesson.id,
+                    "name": lesson.name,
+                    "subject": lesson.subject,
+                    "section_id": None,
+                    "order": lesson.order,
+                    "duration_minutes": lesson.duration_minutes,
+                    "is_completed": lesson.id in completed_ids,
+                    "is_locked": False if can_manage else not _content_unlocked(course, member, lesson),
+                }
+                for lesson in unsectioned_lessons
+            ],
+            "quizzes": [
+                _serialize_quiz(quiz, member, locked=False if can_manage else not _quiz_unlocked(course, member, quiz))
+                for quiz in unsectioned_quizzes
+            ],
+        })
 
-        except Exception as error:
-            last_error = f"Error Gemini: {error}"
-            continue
+    total_lessons = CourseContent.objects.filter(course_id=course, parent_id__isnull=True).count()
+    completed_lessons = len(completed_ids.intersection(set(CourseContent.objects.filter(course_id=course).values_list("id", flat=True))))
+    progress_percent = round(completed_lessons / total_lessons * 100, 2) if total_lessons else 0.0
+    return {
+        "course_id": course.id,
+        "enrollment_id": member.id if member else None,
+        "progress_percent": progress_percent,
+        "sections": section_payloads,
+    }
 
-    return None, last_error or "Gemini tidak mengembalikan jawaban"
 
+@api.get(
+    "/courses/{course_id}/contents/{content_id}/learn",
+    auth=api_auth,
+    response={200: ContentOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Learning"],
+    summary="Detail lesson untuk reader student dengan validasi lock",
+)
+def learn_content_detail(request, course_id: int, content_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    member = _require_course_learning_access(request, course)
+    content = get_object_or_404(CourseContent, id=content_id, course_id=course)
+    if not is_course_owner_or_admin(request.user, course) and not _content_unlocked(course, member, content):
+        raise HttpError(403, "Selesaikan materi sebelumnya terlebih dahulu sebelum membuka lesson ini")
+    log_learning_activity(request.user, course.id, "view_lesson", {"content_id": content.id})
+    return serialize_content(content)
+
+
+@api.get(
+    "/courses/{course_id}/quizzes",
+    auth=api_auth,
+    response={200: list[QuizOut], 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Quizzes"],
+    summary="List kuis pada course",
+)
+def list_course_quizzes(request, course_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    member = _require_course_learning_access(request, course)
+    can_manage = is_course_owner_or_admin(request.user, course)
+    quizzes = Quiz.objects.filter(course=course).order_by("section__order", "order", "id")
+    return [
+        _serialize_quiz(quiz, member, locked=False if can_manage else not _quiz_unlocked(course, member, quiz))
+        for quiz in quizzes
+    ]
+
+
+@api.post(
+    "/courses/{course_id}/quizzes",
+    auth=api_auth,
+    response={201: QuizOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Quizzes"],
+    summary="Buat kuis baru oleh instructor/admin",
+)
+def create_quiz(request, course_id: int, data: QuizIn):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh membuat kuis")
+    if data.minimum_score < 0 or data.minimum_score > 100:
+        raise HttpError(400, "minimum_score harus 0-100")
+    if data.question_count < 1:
+        raise HttpError(400, "question_count minimal 1")
+    section = None
+    if data.section_id is not None:
+        section = get_object_or_404(CourseSection, id=data.section_id, course=course)
+    order = data.order or ((Quiz.objects.filter(course=course, section=section).count()) + 1)
+    quiz = Quiz.objects.create(
+        course=course,
+        section=section,
+        title=data.title,
+        description=data.description,
+        order=order,
+        minimum_score=data.minimum_score,
+        question_count=data.question_count,
+        is_active=data.is_active,
+        created_by=request.user,
+    )
+    log_activity(request.user, "create_quiz", {"course_id": course.id, "quiz_id": quiz.id})
+    return 201, _serialize_quiz(quiz, _member_for_user(course, request.user))
+
+
+@api.patch(
+    "/courses/{course_id}/quizzes/{quiz_id}",
+    auth=api_auth,
+    response={200: QuizOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Quizzes"],
+    summary="Update kuis",
+)
+def update_quiz(request, course_id: int, quiz_id: int, data: QuizUpdateIn):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh mengubah kuis")
+    quiz = get_object_or_404(Quiz, id=quiz_id, course=course)
+    if data.title is not None:
+        quiz.title = data.title
+    if data.description is not None:
+        quiz.description = data.description
+    if data.section_id is not None:
+        quiz.section = get_object_or_404(CourseSection, id=data.section_id, course=course)
+    if data.order is not None:
+        if data.order < 1:
+            raise HttpError(400, "order minimal 1")
+        quiz.order = data.order
+    if data.minimum_score is not None:
+        if data.minimum_score < 0 or data.minimum_score > 100:
+            raise HttpError(400, "minimum_score harus 0-100")
+        quiz.minimum_score = data.minimum_score
+    if data.question_count is not None:
+        if data.question_count < 1:
+            raise HttpError(400, "question_count minimal 1")
+        quiz.question_count = data.question_count
+    if data.is_active is not None:
+        quiz.is_active = data.is_active
+    quiz.save()
+    log_activity(request.user, "update_quiz", {"course_id": course.id, "quiz_id": quiz.id})
+    return _serialize_quiz(quiz, _member_for_user(course, request.user))
+
+
+@api.delete(
+    "/courses/{course_id}/quizzes/{quiz_id}",
+    auth=api_auth,
+    response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Quizzes"],
+    summary="Hapus kuis",
+)
+def delete_quiz(request, course_id: int, quiz_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh menghapus kuis")
+    quiz = get_object_or_404(Quiz, id=quiz_id, course=course)
+    quiz.delete()
+    log_activity(request.user, "delete_quiz", {"course_id": course.id, "quiz_id": quiz_id})
+    return {"message": "Kuis berhasil dihapus"}
+
+
+@api.get(
+    "/courses/{course_id}/quizzes/{quiz_id}/questions",
+    auth=api_auth,
+    response={200: list[QuizQuestionBankOut], 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Question Bank"],
+    summary="List question bank kuis beserta kunci jawaban",
+)
+def list_quiz_questions(request, course_id: int, quiz_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh melihat question bank")
+    quiz = get_object_or_404(Quiz, id=quiz_id, course=course)
+    return [_serialize_quiz_question(q, include_answer=True) for q in quiz.questions.all()]
+
+
+@api.post(
+    "/courses/{course_id}/quizzes/{quiz_id}/questions",
+    auth=api_auth,
+    response={201: QuizQuestionBankOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Question Bank"],
+    summary="Tambah soal ke question bank kuis",
+)
+def create_quiz_question(request, course_id: int, quiz_id: int, data: QuizQuestionIn):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh menambah soal")
+    quiz = get_object_or_404(Quiz, id=quiz_id, course=course)
+    choices = _validate_question_payload(data)
+    question = QuizQuestion.objects.create(
+        quiz=quiz,
+        question_text=data.question_text,
+        choices=choices,
+        correct_answer=data.correct_answer,
+        explanation=data.explanation,
+        points=data.points,
+    )
+    log_activity(request.user, "create_quiz_question", {"course_id": course.id, "quiz_id": quiz.id, "question_id": question.id})
+    return 201, _serialize_quiz_question(question, include_answer=True)
+
+
+@api.patch(
+    "/courses/{course_id}/quizzes/{quiz_id}/questions/{question_id}",
+    auth=api_auth,
+    response={200: QuizQuestionBankOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Question Bank"],
+    summary="Update soal question bank",
+)
+def update_quiz_question(request, course_id: int, quiz_id: int, question_id: int, data: QuizQuestionUpdateIn):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh mengubah soal")
+    quiz = get_object_or_404(Quiz, id=quiz_id, course=course)
+    question = get_object_or_404(QuizQuestion, id=question_id, quiz=quiz)
+    if data.question_text is not None:
+        question.question_text = data.question_text
+    if data.choices is not None:
+        choices = [str(choice).strip() for choice in data.choices if str(choice).strip()]
+        if len(choices) < 2:
+            raise HttpError(400, "Minimal pilihan jawaban adalah 2")
+        question.choices = choices
+    if data.correct_answer is not None:
+        question.correct_answer = data.correct_answer
+    if question.correct_answer not in (question.choices or []):
+        raise HttpError(400, "correct_answer harus sama persis dengan salah satu choices")
+    if data.explanation is not None:
+        question.explanation = data.explanation
+    if data.points is not None:
+        if data.points < 1:
+            raise HttpError(400, "points minimal 1")
+        question.points = data.points
+    question.save()
+    log_activity(request.user, "update_quiz_question", {"course_id": course.id, "quiz_id": quiz.id, "question_id": question.id})
+    return _serialize_quiz_question(question, include_answer=True)
+
+
+@api.delete(
+    "/courses/{course_id}/quizzes/{quiz_id}/questions/{question_id}",
+    auth=api_auth,
+    response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Question Bank"],
+    summary="Hapus soal dari question bank",
+)
+def delete_quiz_question(request, course_id: int, quiz_id: int, question_id: int):
+    course = get_object_or_404(Course, id=course_id)
+    if not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya owner course atau admin yang boleh menghapus soal")
+    quiz = get_object_or_404(Quiz, id=quiz_id, course=course)
+    question = get_object_or_404(QuizQuestion, id=question_id, quiz=quiz)
+    question.delete()
+    log_activity(request.user, "delete_quiz_question", {"course_id": course.id, "quiz_id": quiz.id, "question_id": question_id})
+    return {"message": "Soal berhasil dihapus"}
+
+
+@api.post(
+    "/quizzes/{quiz_id}/start",
+    auth=api_auth,
+    response={201: QuizAttemptStartOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Quiz Attempts"],
+    summary="Student memulai kuis dengan soal acak dari question bank",
+)
+@require_student
+def start_quiz_attempt(request, quiz_id: int):
+    quiz = get_object_or_404(Quiz.objects.select_related("course", "section"), id=quiz_id, is_active=True)
+    course = quiz.course
+    member = _member_for_user(course, request.user)
+    if member is None:
+        raise HttpError(403, "Anda harus enroll ke course ini terlebih dahulu")
+    if not _quiz_unlocked(course, member, quiz):
+        raise HttpError(403, "Selesaikan materi/section sebelumnya terlebih dahulu sebelum membuka kuis ini")
+
+    status = _quiz_attempt_status(quiz, member)
+    if status["passed"]:
+        raise HttpError(400, "Anda sudah lulus kuis ini")
+    if not status["can_attempt"]:
+        raise HttpError(403, status["message"] or "Anda belum bisa memulai kuis saat ini")
+
+    questions = list(quiz.questions.all())
+    if not questions:
+        raise HttpError(400, "Question bank kuis ini masih kosong")
+    random.shuffle(questions)
+    selected_questions = questions[:min(quiz.question_count, len(questions))]
+
+    with transaction.atomic():
+        attempt_number = QuizAttempt.objects.filter(quiz=quiz, member=member).count() + 1
+        attempt = QuizAttempt.objects.create(quiz=quiz, member=member, attempt_number=attempt_number)
+        QuizAttemptAnswer.objects.bulk_create([
+            QuizAttemptAnswer(attempt=attempt, question=question) for question in selected_questions
+        ])
+
+    log_learning_activity(request.user, course.id, "quiz_started", {"quiz_id": quiz.id, "attempt_id": attempt.id})
+    return 201, {
+        "attempt_id": attempt.id,
+        "quiz_id": quiz.id,
+        "quiz_title": quiz.title,
+        "minimum_score": quiz.minimum_score,
+        "attempt_number": attempt.attempt_number,
+        "questions": [
+            {
+                "id": question.id,
+                "question_text": question.question_text,
+                "choices": question.choices or [],
+                "points": question.points,
+            }
+            for question in selected_questions
+        ],
+    }
+
+
+@api.post(
+    "/quizzes/{quiz_id}/attempts/{attempt_id}/submit",
+    auth=api_auth,
+    response={200: QuizAttemptResultOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Quiz Attempts"],
+    summary="Submit jawaban kuis student",
+)
+@require_student
+def submit_quiz_attempt(request, quiz_id: int, attempt_id: int, data: QuizSubmitIn):
+    quiz = get_object_or_404(Quiz, id=quiz_id, is_active=True)
+    member = _member_for_user(quiz.course, request.user)
+    if member is None:
+        raise HttpError(403, "Anda harus enroll ke course ini terlebih dahulu")
+    attempt = get_object_or_404(QuizAttempt, id=attempt_id, quiz=quiz, member=member)
+    if attempt.submitted_at is not None:
+        raise HttpError(400, "Attempt ini sudah disubmit")
+
+    answer_map = {item.question_id: item.selected_answer for item in data.answers}
+    attempt_answers = list(attempt.answers.select_related("question"))
+    if not attempt_answers:
+        raise HttpError(400, "Attempt tidak memiliki soal")
+
+    total_points = sum(answer.question.points for answer in attempt_answers)
+    earned_points = 0
+    correct_count = 0
+    for answer in attempt_answers:
+        selected = str(answer_map.get(answer.question_id, "")).strip()
+        answer.selected_answer = selected
+        answer.is_correct = selected == answer.question.correct_answer
+        if answer.is_correct:
+            earned_points += answer.question.points
+            correct_count += 1
+
+    QuizAttemptAnswer.objects.bulk_update(attempt_answers, ["selected_answer", "is_correct"])
+    score = round((earned_points / total_points) * 100, 2) if total_points > 0 else 0
+    passed = score >= quiz.minimum_score
+
+    cooldown_until = None
+    message = "Selamat, Anda lulus kuis ini." if passed else "Nilai belum mencapai batas minimum."
+    if not passed:
+        now = timezone.now()
+        window_start = now - timedelta(minutes=QUIZ_COOLDOWN_MINUTES)
+        failed_before = QuizAttempt.objects.filter(
+            quiz=quiz,
+            member=member,
+            passed=False,
+            submitted_at__gte=window_start,
+        ).count()
+        if failed_before + 1 >= QUIZ_MAX_FAILED_ATTEMPTS:
+            cooldown_until = now + timedelta(minutes=QUIZ_COOLDOWN_MINUTES)
+            message = "Anda bisa menelusuri ulang materi-materi sebelumnya sebelum memulai kembali."
+
+    attempt.mark_submitted(score=score, passed=passed, cooldown_until=cooldown_until)
+    invalidate_dashboard_cache(request.user.id)
+    if passed and _course_completed_by_member(quiz.course, member):
+        generate_certificate.delay(member.id)
+
+    status = _quiz_attempt_status(quiz, member)
+    log_learning_activity(request.user, quiz.course_id, "quiz_submitted", {"quiz_id": quiz.id, "attempt_id": attempt.id, "score": score, "passed": passed})
+    return {
+        "attempt_id": attempt.id,
+        "quiz_id": quiz.id,
+        "score": float(score),
+        "correct_count": correct_count,
+        "total_questions": len(attempt_answers),
+        "passed": passed,
+        "minimum_score": quiz.minimum_score,
+        "remaining_attempts": status["remaining_attempts"],
+        "cooldown_until": status["cooldown_until"],
+        "message": message,
+    }
+
+
+# =============================================================================
+# 11. CHATBOT ASSISTANT
+# =============================================================================
 
 @api.post(
     "/chatbot",
@@ -2512,81 +2647,201 @@ def _chatbot_call_gemini(user_message: str, db_answer: str, db_context: str):
 )
 @require_student
 def chatbot_assistant(request, data: ChatbotIn):
-    user_message = (data.message or "").strip()
-
+    import json
+    import urllib.request
+    import urllib.error
+    
+    user_message = data.message.strip()
     if not user_message:
         raise HttpError(400, "Pesan tidak boleh kosong")
-
-    intent, keywords, results = _chatbot_get_db_results(user_message)
-    db_answer = _chatbot_build_db_answer(user_message, intent, keywords, results)
-    db_context = _chatbot_course_context_for_ai(results)
-
-    # Untuk pertanyaan yang sifatnya data pasti dari database,
-    # langsung return hasil DB agar Gemini tidak mengarang data.
-    deterministic_intents = {
-        "cheapest",
-        "most_expensive",
-        "free",
-        "best_rating",
-        "beginner",
-        "intermediate",
-        "advanced",
-        "recommendation",
-    }
-
-    if intent in deterministic_intents or keywords:
-        try:
-            log_activity(
-                request.user,
-                "chatbot_db_first_response",
-                {
-                    "message": user_message[:200],
-                    "intent": intent,
-                    "keywords": keywords,
-                    "result_count": len(results),
-                },
-            )
-        except Exception:
-            pass
-
-        return {"response": db_answer}
-
-    ai_response, ai_error = _chatbot_call_gemini(
-        user_message=user_message,
-        db_answer=db_answer,
-        db_context=db_context,
-    )
-
-    if ai_response:
-        try:
-            log_activity(
-                request.user,
-                "chatbot_ai_response",
-                {
-                    "message": user_message[:200],
-                    "intent": intent,
-                    "keywords": keywords,
-                    "result_count": len(results),
-                },
-            )
-        except Exception:
-            pass
-
-        return {"response": ai_response}
-
-    try:
-        log_activity(
-            request.user,
-            "chatbot_db_fallback_response",
-            {
-                "message": user_message[:200],
-                "intent": intent,
-                "keywords": keywords,
-                "result_count": len(results),
-                "ai_error": ai_error[:300] if ai_error else "",
-            },
+    
+    # 1. Dapatkan daftar kursus yang aktif/published untuk context
+    courses = Course.objects.filter(status="published").select_related("teacher", "category")
+    course_list = []
+    for c in courses:
+        cat_name = c.category.name if c.category else "Tanpa Kategori"
+        teacher_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
+        course_list.append(
+            f"- {c.name} (Level: {c.level}) - Kategori: {cat_name} - Harga: Rp {c.price} - Instruktur: {teacher_name}. Deskripsi: {c.description}"
         )
-    except Exception:
-        pass
+    courses_context = "\n".join(course_list)
+    
+    # 2. Cek apakah GEMINI_API_KEY ada di environment
+    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+    
+    if not gemini_api_key:
+        # Fallback offline: Lakukan pencarian kata kunci sederhana dari database
+        matching_courses = []
+        words = user_message.lower().split()
+        for word in words:
+            if len(word) > 2:  # cari kata kunci yang cukup panjang
+                # cari course yang memiliki kecocokan nama atau deskripsi
+                matched = Course.objects.filter(
+                    Q(name__icontains=word) | Q(description__icontains=word),
+                    status="published"
+                ).select_related("teacher")
+                matching_courses.extend(matched)
+        
+        # Remove duplicates
+        unique_matches = []
+        seen_ids = set()
+        for c in matching_courses:
+            if c.id not in seen_ids:
+                seen_ids.add(c.id)
+                unique_matches.append(c)
+                
+        if unique_matches:
+            recs = []
+            for c in unique_matches[:3]:
+                t_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
+                recs.append(f"- **{c.name}** (Level: {c.level}, Harga: Rp {c.price}) oleh {t_name}")
+            course_recommendations = "\n".join(recs)
+            
+            response_text = (
+                "[Demo Mode - GEMINI_API_KEY belum dikonfigurasi di file .env]\n\n"
+                f"Halo! Saya mendeteksi Anda mencari kursus terkait. Berikut beberapa rekomendasi dari database kami:\n\n"
+                f"{course_recommendations}\n\n"
+                "Untuk mengaktifkan asisten AI pintar Gemini, silakan konfigurasikan kunci API `GEMINI_API_KEY` di file `.env` backend Anda."
+            )
+        else:
+            response_text = (
+                "[Demo Mode - GEMINI_API_KEY belum dikonfigurasi di file .env]\n\n"
+                "Halo! Saya adalah asisten virtual Simple LMS. Untuk saat ini, kunci API Gemini belum dikonfigurasi. "
+                "Namun, Anda dapat melihat daftar kursus secara lengkap di halaman utama (Dashboard/Course) atau "
+                "mengonfigurasikan `GEMINI_API_KEY` pada file `.env` di backend untuk mengaktifkan AI."
+            )
+        return {"response": response_text}
+        
+    # 3. Request ke Gemini API
+    # Kita akan mencoba beberapa model alternatif jika model utama sedang padat (high demand)
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest"]
+    
+    system_instruction = (
+        "Anda adalah AI Chatbot Asisten untuk platform e-learning bernama Simple LMS. "
+        "Tugas Anda adalah membantu siswa (Student) menemukan dan merekomendasikan kursus yang sesuai, "
+        "serta menjawab pertanyaan seputar materi belajar secara ringkas, ramah, dan solutif.\n\n"
+        "Berikut adalah daftar kursus yang tersedia saat ini di Simple LMS:\n"
+        f"{courses_context}\n\n"
+        "Instruksi tambahan:\n"
+        "1. Jawablah menggunakan Bahasa Indonesia yang ramah dan interaktif.\n"
+        "2. Jika pengguna mencari atau menanyakan tentang kursus/topik tertentu, rekomendasikan kursus yang paling relevan dari daftar di atas. Cantumkan nama kursus, harga, instruktur, dan deskripsi singkat mengapa cocok untuk mereka.\n"
+        "3. Jika tidak ada kursus yang secara langsung cocok, katakan dengan ramah bahwa saat ini kursus tersebut belum tersedia, namun berikan saran kursus lain yang terdekat atau tawarkan bantuan belajar umum.\n"
+        "4. Buat jawaban Anda ringkas, terstruktur (gunakan bullet points jika merekomendasikan beberapa), dan mudah dipahami."
+    )
+    
+    prompt = f"{system_instruction}\n\nPertanyaan Pengguna: {user_message}\nJawaban:"
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+    
+    response_text = None
+    last_error_message = ""
+    
+    for model_name in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
+        
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        
+        try:
+            with urllib.request.urlopen(req, timeout=12) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+                response_text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+                break  # Berhasil! Keluar dari loop
+        except urllib.error.HTTPError as e:
+            error_msg = e.read().decode("utf-8")
+            try:
+                error_json = json.loads(error_msg)
+                last_error_message = error_json.get("error", {}).get("message", f"HTTP {e.code}")
+            except Exception:
+                last_error_message = f"Error HTTP {e.code}"
+            
+            # Jika API key tidak valid, langsung keluar agar tidak membuang waktu mencoba model lain
+            if any(x in last_error_message.lower() for x in ["key", "api_key", "not valid", "unauthorized"]):
+                break
+            continue  # Coba model alternatif berikutnya
+        except Exception as e:
+            last_error_message = str(e)
+            continue  # Coba model alternatif berikutnya
 
-    return {"response": db_answer}
+    if response_text:
+        return {"response": response_text}
+        
+    # 4. Graceful Fallback ke Pencarian Database Lokal (jika semua request AI gagal / limit terlampaui)
+    matching_courses = []
+    STOP_WORDS = {
+        "rekomendasi", "belajar", "kursus", "kelas", "saya", "ingin", "cari", "tahu", "tentang", 
+        "materi", "dosen", "kuliah", "tanya", "bagaimana", "cara", "yang", "untuk", "adalah",
+        "dengan", "pada", "oleh", "atau", "dan", "dari", "bisa", "dapat", "course", "apa", "itu",
+        "tolong", "bantu", "halo", "hai", "selamat", "pagi", "siang", "sore", "malam"
+    }
+    words = [w for w in user_message.lower().split() if w not in STOP_WORDS and len(w) > 2]
+    
+    # Fallback jika kata kunci kosong setelah difilter stop words
+    if not words:
+        words = [w for w in user_message.lower().split() if len(w) > 2]
+        
+    for word in words:
+        matched = Course.objects.filter(
+            Q(name__icontains=word) | Q(description__icontains=word),
+            status="published"
+        ).select_related("teacher")
+        matching_courses.extend(matched)
+        
+    # Remove duplicates
+    unique_matches = []
+    seen_ids = set()
+    for c in matching_courses:
+        if c.id not in seen_ids:
+            seen_ids.add(c.id)
+            unique_matches.append(c)
+            
+    # Cek tipe error
+    is_key_invalid = any(x in last_error_message.lower() for x in ["key", "api_key", "not valid", "unauthorized"])
+    
+    if is_key_invalid:
+        prefix = "[Error - Kunci API Gemini Tidak Valid]\n\n"
+        suffix = "\n\n*(Silakan periksa kunci API `GEMINI_API_KEY` Anda di file `.env` backend)*"
+    else:
+        prefix = "[Layanan AI Padat - Hasil Pencarian Database]\n\n"
+        suffix = f"\n\n*(Catatan: Asisten AI sedang padat. Menampilkan hasil database lokal. Error: {last_error_message})*"
+
+    if unique_matches:
+        recs = []
+        for c in unique_matches[:3]:
+            t_name = f"{c.teacher.first_name} {c.teacher.last_name}".strip() or c.teacher.username
+            recs.append(f"- **{c.name}** (Level: {c.level}, Harga: Rp {c.price}) oleh {t_name}")
+        course_recommendations = "\n".join(recs)
+        
+        response_text = (
+            f"{prefix}"
+            f"Halo! Layanan AI Gemini saat ini sedang mengalami lalu lintas tinggi (high demand). "
+            f"Sebagai alternatif, berikut rekomendasi kursus yang relevan dari database kami:\n\n"
+            f"{course_recommendations}"
+            f"{suffix}"
+        )
+    else:
+        response_text = (
+            f"{prefix}"
+            f"Halo! Layanan AI Gemini saat ini sedang mengalami lalu lintas tinggi (high demand). "
+            f"Saya tidak menemukan kursus yang cocok secara spesifik dengan kata kunci Anda di database kami saat ini. "
+            f"Silakan coba kirim pesan Anda beberapa saat lagi."
+            f"{suffix}"
+        )
+        
+    return {"response": response_text}
+
+

@@ -2,8 +2,7 @@
 # Simple LMS - Docker Compose
 # =============================================================================
 # Semua nilai sensitif dibaca dari file .env di direktori yang sama.
-# Salin .env.example menjadi .env lalu isi nilainya sebelum menjalankan:
-#   cp .env.example .env
+# Salin .env.example → .env lalu isi nilainya sebelum menjalankan:
 #   docker compose up -d
 # =============================================================================
 
@@ -18,10 +17,6 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    environment:
-      - CELERY_BROKER_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
-      - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - database
       - redis
@@ -63,11 +58,9 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
-    env_file:
-      - .env
     environment:
-      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
-      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: password123
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -85,8 +78,8 @@ services:
     env_file:
       - .env
     environment:
-      - CELERY_BROKER_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - app
@@ -103,13 +96,11 @@ services:
     env_file:
       - .env
     environment:
-      - CELERY_BROKER_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - celery-worker
-      - rabbitmq
-      - redis
 
   flower:
     image: kaqfa/be_simple_lms-django
@@ -119,16 +110,13 @@ services:
       - ./code:/code
     ports:
       - "5555:5555"
-    env_file:
-      - .env
     environment:
-      - CELERY_BROKER_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - celery-worker
       - rabbitmq
-      - redis
 
 volumes:
   pg_data:

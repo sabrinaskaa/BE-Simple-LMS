@@ -173,7 +173,7 @@ RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))              
 FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("FILE_UPLOAD_MAX_MEMORY_SIZE", str(10 * 1024 * 1024)))  # 10 MB
 DATA_UPLOAD_MAX_MEMORY_SIZE = FILE_UPLOAD_MAX_MEMORY_SIZE
 ALLOWED_UPLOAD_EXTENSIONS = [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".mp4", ".png", ".jpg", ".jpeg"]
-MAX_UPLOAD_SIZE_BYTES = int(os.environ.get("MAX_UPLOAD_SIZE_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+MAX_UPLOAD_SIZE_BYTES = int(os.environ.get("MAX_UPLOAD_SIZE_BYTES", str(100 * 1024 * 1024)))  # 100 MB default agar upload video MP4 kecil-menengah lebih realistis
 
 
 # =============================================================================
@@ -194,10 +194,9 @@ X_FRAME_OPTIONS = "DENY"
 # Redis, MongoDB, Celery, Email
 # =============================================================================
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
-
 MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://mongodb:27017/")
-MONGODB_NAME = os.environ.get("MONGODB_NAME", "lms_logs")
-MONGODB_ANALYTICS_DB = os.environ.get("MONGODB_ANALYTICS_DB", "lms_analytics")
+MONGODB_NAME = os.environ.get("MONGODB_NAME", "lms_logs")              # database untuk system/error logs
+MONGODB_ANALYTICS_DB = os.environ.get("MONGODB_ANALYTICS_DB", "lms_analytics")  # database untuk analytics
 
 CACHES = {
     "default": {
@@ -209,17 +208,8 @@ CACHES = {
     }
 }
 
-RABBITMQ_DEFAULT_USER = os.environ.get("RABBITMQ_DEFAULT_USER", "guest")
-RABBITMQ_DEFAULT_PASS = os.environ.get("RABBITMQ_DEFAULT_PASS", "guest")
-RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
-RABBITMQ_PORT = os.environ.get("RABBITMQ_PORT", "5672")
-
-CELERY_BROKER_URL = os.environ.get(
-    "CELERY_BROKER_URL",
-    f"amqp://{RABBITMQ_DEFAULT_USER}:{RABBITMQ_DEFAULT_PASS}@{RABBITMQ_HOST}:{RABBITMQ_PORT}//",
-)
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "amqp://admin:password123@rabbitmq:5672//")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/2")
-
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
