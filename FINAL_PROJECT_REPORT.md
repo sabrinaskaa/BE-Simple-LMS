@@ -6,7 +6,7 @@
 ## Identitas
 - **Nama**: Sabrina Aska Amalina
 - **NIM**: A11.2023.15264
-- **Kelas**: A11.54403 — Pemrograman Sisi Server
+- **Kelas**: A11.4618 — Pemrograman Sisi Server
 - **URL Repository**: https://github.com/sabrinaskaa/BE-Simple-LMS
 - **Deployment Link**: https://fe-simple-lms.vercel.app/
 
