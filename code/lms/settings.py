@@ -60,6 +60,7 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "analytics.middleware.ActivityLoggingMiddleware",  # Auto-log setiap request ke MongoDB
+    "courses.middleware.RateLimitHeaderMiddleware",  # Header X-RateLimit-* dan Retry-After
 ]
 
 ROOT_URLCONF = "lms.urls"
@@ -155,6 +156,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+JWT_PRIVATE_KEY_PATH = os.environ.get("JWT_PRIVATE_KEY_PATH", str(BASE_DIR / "keys" / "jwt_private.pem"))
+JWT_PUBLIC_KEY_PATH = os.environ.get("JWT_PUBLIC_KEY_PATH", str(BASE_DIR / "keys" / "jwt_public.pem"))
 
 
 # =============================================================================
@@ -172,7 +175,12 @@ RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))              
 # =============================================================================
 FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("FILE_UPLOAD_MAX_MEMORY_SIZE", str(10 * 1024 * 1024)))  # 10 MB
 DATA_UPLOAD_MAX_MEMORY_SIZE = FILE_UPLOAD_MAX_MEMORY_SIZE
-ALLOWED_UPLOAD_EXTENSIONS = [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".mp4", ".png", ".jpg", ".jpeg"]
+_DEFAULT_UPLOAD_EXTENSIONS = ".pdf,.doc,.docx,.ppt,.pptx,.mp4,.png,.jpg,.jpeg"
+ALLOWED_UPLOAD_EXTENSIONS = [
+    ext.strip().lower()
+    for ext in os.environ.get("ALLOWED_UPLOAD_EXTENSIONS", _DEFAULT_UPLOAD_EXTENSIONS).split(",")
+    if ext.strip()
+]
 MAX_UPLOAD_SIZE_BYTES = int(os.environ.get("MAX_UPLOAD_SIZE_BYTES", str(100 * 1024 * 1024)))  # 100 MB default agar upload video MP4 kecil-menengah lebih realistis
 
 
@@ -208,12 +216,50 @@ CACHES = {
     }
 }
 
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "amqp://admin:password123@rabbitmq:5672//")
+RABBITMQ_DEFAULT_USER = os.environ.get("RABBITMQ_DEFAULT_USER", "admin")
+RABBITMQ_DEFAULT_PASS = os.environ.get("RABBITMQ_DEFAULT_PASS", "password123")
+DEFAULT_CELERY_BROKER_URL = f"amqp://{RABBITMQ_DEFAULT_USER}:{RABBITMQ_DEFAULT_PASS}@rabbitmq:5672//"
+
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", DEFAULT_CELERY_BROKER_URL)
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/2")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_DEFAULT_QUEUE = os.environ.get("CELERY_TASK_DEFAULT_QUEUE", "default")
+
+# Queue RabbitMQ eksplisit + Dead Letter Exchange (DLX).
+# Task yang gagal setelah retry dapat dipantau di queue dead_letter.
+from kombu import Exchange, Queue  # noqa: E402
+
+CELERY_TASK_DEFAULT_EXCHANGE = "default"
+CELERY_TASK_DEFAULT_ROUTING_KEY = "default"
+CELERY_TASK_QUEUES = (
+    Queue("default", Exchange("default", type="direct"), routing_key="default", queue_arguments={"x-dead-letter-exchange": "dlx", "x-dead-letter-routing-key": "dead_letter"}),
+    Queue("emails", Exchange("emails", type="direct"), routing_key="emails", queue_arguments={"x-dead-letter-exchange": "dlx", "x-dead-letter-routing-key": "dead_letter"}),
+    Queue("reports", Exchange("reports", type="direct"), routing_key="reports", queue_arguments={"x-dead-letter-exchange": "dlx", "x-dead-letter-routing-key": "dead_letter"}),
+    Queue("certificates", Exchange("certificates", type="direct"), routing_key="certificates", queue_arguments={"x-dead-letter-exchange": "dlx", "x-dead-letter-routing-key": "dead_letter"}),
+    Queue("maintenance", Exchange("maintenance", type="direct"), routing_key="maintenance", queue_arguments={"x-dead-letter-exchange": "dlx", "x-dead-letter-routing-key": "dead_letter"}),
+    Queue("uploads", Exchange("uploads", type="direct"), routing_key="uploads", queue_arguments={"x-dead-letter-exchange": "dlx", "x-dead-letter-routing-key": "dead_letter"}),
+    Queue("dead_letter", Exchange("dlx", type="direct"), routing_key="dead_letter"),
+)
+
+CELERY_TASK_ROUTES = {
+    # Routing queue eksplisit agar RabbitMQ/Celery terlihat jelas di Flower & Management UI.
+    "courses.tasks.send_welcome_email": {"queue": "emails"},
+    "courses.tasks.send_enrollment_email": {"queue": "emails"},
+    "courses.tasks.send_email_task": {"queue": "emails"},
+    "courses.tasks.generate_course_report": {"queue": "reports"},
+    "courses.tasks.export_course_report": {"queue": "reports"},
+    "courses.tasks.fetch_course_data": {"queue": "reports"},
+    "courses.tasks.format_report": {"queue": "reports"},
+    "courses.tasks.save_report": {"queue": "reports"},
+    "courses.tasks.generate_certificate": {"queue": "certificates"},
+    "courses.tasks.update_course_statistics": {"queue": "maintenance"},
+    "courses.tasks.generate_daily_stats": {"queue": "maintenance"},
+    "courses.tasks.cleanup_old_logs": {"queue": "maintenance"},
+    "courses.tasks.process_uploaded_material": {"queue": "uploads"},
+}
 
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 DEFAULT_FROM_EMAIL = "noreply@simple-lms.local"

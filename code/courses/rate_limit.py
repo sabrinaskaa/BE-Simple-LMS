@@ -49,6 +49,17 @@ def rate_limit(limit: int | None = None, window: int | None = None, prefix: str 
                 client.expire(key, effective_window)
 
             ttl = client.ttl(key)
+            if ttl is None or ttl < 0:
+                ttl = effective_window
+
+            remaining = max(effective_limit - current, 0)
+            request._rate_limit_info = {
+                "limit": effective_limit,
+                "remaining": remaining,
+                "reset": ttl,
+                "retry_after": ttl if current > effective_limit else None,
+            }
+
             if current > effective_limit:
                 raise HttpError(
                     429,

@@ -59,8 +59,8 @@ services:
       - "5672:5672"
       - "15672:15672"
     environment:
-      RABBITMQ_DEFAULT_USER: admin
-      RABBITMQ_DEFAULT_PASS: password123
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -72,14 +72,12 @@ services:
   celery-worker:
     image: kaqfa/be_simple_lms-django
     container_name: lms-celery-worker
-    command: sh -c "pip install -r requirements.txt && celery -A lms worker -l info"
+    command: sh -c "pip install -r requirements.txt && celery -A lms worker -l info -Q default,emails,reports,certificates,maintenance,uploads,dead_letter"
     volumes:
       - ./code:/code
     env_file:
       - .env
     environment:
-      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - app
@@ -96,8 +94,6 @@ services:
     env_file:
       - .env
     environment:
-      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - celery-worker
@@ -110,9 +106,9 @@ services:
       - ./code:/code
     ports:
       - "5555:5555"
+    env_file:
+      - .env
     environment:
-      - CELERY_BROKER_URL=amqp://admin:password123@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - DJANGO_SETTINGS_MODULE=lms.settings
     depends_on:
       - celery-worker

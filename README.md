@@ -18,6 +18,7 @@ Proyek ini menerapkan arsitektur **polyglot persistence**:
 - [Dokumentasi API (Swagger)](#dokumentasi-api-swagger)
 - [Daftar Endpoint](#daftar-endpoint)
 - [Struktur Project](#struktur-project)
+- [Update Penyesuaian Dokumen](#update-penyesuaian-dokumen)
 
 ---
 
@@ -47,9 +48,9 @@ Proyek ini membagi MongoDB menjadi 2 database utama:
    - `request_logs`: Menyimpan history hit HTTP request yang ditangkap secara otomatis.
 
 ### Indexing & Optimasi
-Saat aplikasi startup, index berikut otomatis dibuat pada collection `activity_logs`:
-- **Single field index**: `user_id`, `timestamp`, `action`
-- **Compound index**: `(user_id, timestamp DESC)` dan `(action, timestamp DESC)`
+Saat aplikasi startup, index berikut otomatis dibuat pada MongoDB:
+- `activity_logs`: `user_id`, `timestamp`, `action`, `(user_id, timestamp DESC)`, `(action, timestamp DESC)`
+- `request_logs`: `timestamp`, `user_id`, `path`, `status_code`, `(path, timestamp DESC)`, `(status_code, timestamp DESC)`
 
 ---
 
@@ -93,12 +94,13 @@ docker compose exec app python manage.py seed_data
 Seeder akan membuat:
 - 3 Django Groups (Admin, Instructor, Student)
 - 1 superuser admin
-- 20 user dosen (Instructor) + 80 user mahasiswa (Student)
+- 20 user dosen (Instructor) + 200 user mahasiswa (Student)
 - 5 Kategori course
-- 100 Course (dengan level, status, dan rating), 500 CourseMember, 300 CourseContent
-- 92 CourseSection (kurikulum), 90 konten di-assign ke sections
-- 213 CourseReview (dengan recalculated rating_avg), 200 Wishlist
-- 1000+ Comment
+- 100 Course published untuk pengujian optimasi database
+- Minimal 500 CourseMember/enrollment
+- 400+ CourseSection, 800+ lesson/article content, quiz per section, dan question bank
+- CourseReview, Wishlist, LessonProgress demo
+- Minimal 1000 Comment untuk pengujian query dan agregasi
 
 ### Langkah 4 — Verifikasi
 
@@ -106,7 +108,7 @@ Seeder akan membuat:
 |---|---|
 | http://localhost:8000/api/v1/docs | Swagger UI — dokumentasi & testing API (Termasuk modul `/analytics/`) |
 | http://localhost:8000/admin/ | Django Admin panel |
-| http://localhost:15672 | RabbitMQ Management (guest / guest) |
+| http://localhost:15672 | RabbitMQ Management (`RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS`) |
 | http://localhost:5555 | Flower — Celery task monitoring |
 
 ---
@@ -136,7 +138,7 @@ Semua akun berikut langsung tersedia setelah menjalankan `seed_data`.
 |---|---|---|
 | `mhs001` | `password123` | Student |
 | `mhs002` | `password123` | Student |
-| `mhs003` s/d `mhs080` | `password123` | Student |
+| `mhs003` s/d `mhs200` | `password123` | Student |
 
 > Student bisa melihat course, enroll, dan menandai lesson sebagai selesai.
 
@@ -168,7 +170,10 @@ Semua endpoint berada di bawah prefix `/api/v1/`.
 |---|---|---|---|
 | `POST` | `/auth/register` | ❌ | Daftar akun baru (otomatis jadi Student) |
 | `POST` | `/auth/login` | ❌ | Login, mendapatkan access & refresh token |
+| `POST` | `/auth/sign-in` | ❌ | Alias login agar kompatibel dengan dokumen |
 | `POST` | `/auth/refresh` | ❌ | Perbarui access token menggunakan refresh token |
+| `POST` | `/auth/token-refresh` | ❌ | Alias refresh token agar kompatibel dengan dokumen |
+| `POST` | `/auth/logout` | ✅ | Logout dan blacklist token di Redis |
 | `GET` | `/auth/me` | ✅ | Lihat profil user yang sedang login |
 | `PUT` | `/auth/me` | ✅ | Update profil (email, nama) |
 
@@ -194,6 +199,9 @@ Semua endpoint berada di bawah prefix `/api/v1/`.
 | `DELETE` | `/courses/{id}` | ✅ | Owner/Admin | Hapus course |
 
 **Query parameter untuk `GET /courses`:**
+
+> Filtering pada endpoint ini sudah memakai `CourseFilter(FilterSchema)` dari Django Ninja, sehingga parameter filter tampil rapi di Swagger dan diterapkan secara deklaratif ke queryset.
+
 - `search` — cari berdasarkan nama/deskripsi
 - `category_id` — filter berdasarkan ID kategori
 - `instructor_id` — filter berdasarkan ID instructor
@@ -443,4 +451,61 @@ BE-Simple-LMS/
         ├── middleware.py   # Auto-logging HTTP requests di background thread
         ├── tests.py        # Unit tests dengan mock MongoDB
         └── urls.py         # Routing placeholder
+```
+
+
+---
+
+## Update Penyesuaian Dokumen
+
+Perubahan terbaru difokuskan pada bagian yang sebelumnya belum sepenuhnya lengkap dari dokumen penilaian, tanpa menghapus flow LMS yang sudah ada. Detail teknis lengkap ada di `docs/IMPLEMENTATION_GAP_UPDATES.md` dan `docs/TESTING_AND_BENCHMARK_GUIDE.md`.
+
+### Optimasi Database
+- Seeder default sekarang menyiapkan dataset besar: 100 course, 20 instructor, 200 student, minimal 500 enrollment, dan minimal 1000 komentar.
+- Command benchmark ditambahkan: `python manage.py benchmark_lms --iterations 5`.
+
+### Automated Testing
+- Ditambahkan `.coveragerc` dengan target coverage 80%.
+- Ditambahkan dependency `coverage`, `locust`, dan `factory-boy`.
+- Ditambahkan `locustfile.py` untuk load testing endpoint course dan analytics.
+
+### Redis
+- Ditambahkan cache hit/miss metrics.
+- Endpoint admin baru: `GET /api/v1/cache/metrics` dan `POST /api/v1/cache/metrics/reset`.
+
+### MongoDB
+- Index MongoDB diperluas untuk `activity_logs` dan `request_logs`.
+- Endpoint admin raw logs ditambahkan: `/api/v1/analytics/activity-logs/` dan `/api/v1/analytics/request-logs/`.
+- Activity log mendukung update/delete untuk demo CRUD MongoDB.
+
+### Celery/RabbitMQ
+- RabbitMQ credential dipindahkan ke `.env`.
+- Celery routing ditambahkan untuk queue `emails`, `reports`, `certificates`, dan `maintenance`.
+
+### Auth & Upload
+- Ditambahkan endpoint alias `/auth/sign-in` dan `/auth/token-refresh`.
+- Ditambahkan `/auth/logout` dengan token blacklist di Redis.
+- Upload materi mendukung PDF, dokumen Office, PPT, MP4, dan gambar sesuai `ALLOWED_UPLOAD_EXTENSIONS`.
+
+## Update v3 — Penyesuaian Akhir Dokumen
+
+Versi ini menutup gap teknis yang sebelumnya masih tersisa:
+
+- **Database Optimization**: endpoint lab baseline/optimized tersedia di Swagger pada `/api/v1/lab/...`.
+- **Authentication & Authorization**: tersedia protected alias `/api/v1/secure/courses`, endpoint literal `/api/v1/comments/`, logout + blacklist token, alias `/auth/sign-in`, `/auth/token-refresh`, dan command `make_rsa` untuk RSA key pair jika ingin memakai `JWT_ALGORITHM=RS256`.
+- **Advanced API Features**: `FilterSchema` sudah dipakai, endpoint demo `@paginate(PageNumberPagination)` tersedia di `/api/v1/courses-ninja-pagination`, rate-limit headers sudah ditambahkan, `/api/v2/` sudah tersedia, dan upload materi mempertahankan ekstensi asli file.
+- **Automated Testing**: `.coveragerc`, Locust, Factory Boy factory, smoke test factory, dan GitHub Actions workflow sudah ditambahkan.
+- **Redis**: cache metrics dan write-through detail course sudah tersedia.
+- **MongoDB**: raw logs, CRUD log, indexes, dan command `benchmark_mongo` sudah tersedia.
+- **Message Broker & Async Tasks**: custom queue routing, uploads queue, dead letter queue, dan async task `process_uploaded_material` sudah tersedia.
+
+Perintah tambahan:
+
+```bash
+cd code
+python manage.py make_rsa
+python manage.py benchmark_lms
+python manage.py benchmark_mongo
+coverage run manage.py test && coverage report --fail-under=80
+locust -f locustfile.py --host=http://localhost:8000
 ```

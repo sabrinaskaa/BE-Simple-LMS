@@ -8,26 +8,18 @@ import os
 
 
 def lesson_pdf_upload_path(instance, filename):
-    """
-    Membuat path penyimpanan file PDF materi dengan format:
-        {course_id}-{section_id}-{lesson_id}-{timestamp}-{namafile}.pdf
-
-    Contoh: 3-7-42-20260703141523-intro_materi.pdf
-    File disimpan di: media/lessons/<path_di_atas>
-    """
     from django.utils import timezone as tz
 
-    # Ambil nama file tanpa ekstensi, paksa ekstensi menjadi .pdf
-    base_name = os.path.splitext(filename)[0]
-    # Ganti karakter tidak aman dengan underscore
-    safe_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name)
+    base_name, ext = os.path.splitext(filename or "materi")
+    ext = (ext or "").lower()
+    safe_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name) or "materi"
 
     course_id = instance.course_id_id if instance.course_id_id else 0
     section_id = instance.section_id if instance.section_id else 0
     lesson_id = instance.pk if instance.pk else 0
     timestamp = tz.now().strftime("%Y%m%d%H%M%S")
 
-    new_filename = f"{course_id}-{section_id}-{lesson_id}-{timestamp}-{safe_name}.pdf"
+    new_filename = f"{course_id}-{section_id}-{lesson_id}-{timestamp}-{safe_name}{ext}"
     return os.path.join("lessons", new_filename)
 
 
@@ -195,7 +187,7 @@ class CourseContent(models.Model):
         blank=True
     )
     file_attachment = models.FileField(
-        "File PDF Materi",
+        "File Materi",
         null=True,
         blank=True,
         upload_to=lesson_pdf_upload_path,
@@ -357,7 +349,6 @@ PUBLISH_REQUEST_STATUS = [
 
 
 class CoursePublishRequest(models.Model):
-    """Tracks every publish request an instructor submits for admin review."""
     course = models.ForeignKey(
         Course,
         verbose_name="matkul",
@@ -398,7 +389,6 @@ class CoursePublishRequest(models.Model):
 
 
 class CoursePrerequisite(models.Model):
-    """A course can require one or more other courses to be completed first."""
     course = models.ForeignKey(
         Course,
         verbose_name="matkul",
@@ -422,7 +412,6 @@ class CoursePrerequisite(models.Model):
         unique_together = ("course", "required_course")
 
 class Quiz(models.Model):
-    """Kuis yang ditempatkan pada course atau section tertentu."""
     course = models.ForeignKey(
         Course,
         verbose_name="matkul",
@@ -472,7 +461,6 @@ class Quiz(models.Model):
 
 
 class QuizQuestion(models.Model):
-    """Question bank untuk sebuah kuis. Opsi disimpan sebagai list string di JSONField."""
     quiz = models.ForeignKey(
         Quiz,
         verbose_name="kuis",

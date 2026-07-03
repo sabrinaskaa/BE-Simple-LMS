@@ -1,6 +1,8 @@
 import json
+import os
 import time
 import unittest
+from urllib.parse import urlparse
 
 import redis
 
@@ -8,7 +10,14 @@ import redis
 class TestWeatherCacheIntegration(unittest.TestCase):
 
     def setUp(self):
-        self.r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        parsed = urlparse(redis_url)
+        self.r = redis.Redis(
+            host=parsed.hostname or "localhost",
+            port=parsed.port or 6379,
+            db=int(parsed.path.lstrip("/") or 0),
+            decode_responses=True,
+        )
         self.test_city = "TestCity"
         self.cache_key = f"weather:{self.test_city.strip().lower()}"
         self.r.delete(self.cache_key)

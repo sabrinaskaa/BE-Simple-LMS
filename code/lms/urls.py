@@ -5,6 +5,7 @@ from django.urls import path, include
 from django.views.generic import RedirectView
 
 from courses.api import api
+from courses.api_v2 import api_v2
 
 # Mount analytics router ke API yang sudah ada
 # Semua endpoint analytics muncul di Swagger yang sama (/api/v1/docs)
@@ -18,9 +19,11 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     # path('silk/', include('silk.urls', namespace='silk')),
 
-    # API v1 — semua endpoint di bawah /api/v1/
-    # Untuk versi baru, tambahkan path("api/v2/", api_v2.urls) tanpa memecah client v1.
+    # API v1 — semua endpoint utama di bawah /api/v1/
     path("api/v1/", api.urls),
+
+    # API v2 — demonstrasi API versioning paralel tanpa memecah client v1.
+    path("api/v2/", api_v2.urls),
     path('', include('courses.urls')),
 ]
 

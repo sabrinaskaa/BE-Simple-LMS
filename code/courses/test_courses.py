@@ -38,6 +38,8 @@ class LMSTestCase(TestCase):
 
         self._patch_cache_redis = patch("courses.cache.get_redis_client", return_value=redis_mock)
         self._patch_rate_redis = patch("courses.rate_limit.get_redis_client", return_value=redis_mock)
+        # Patch is_token_blacklisted langsung agar token JWT di test tidak dianggap blacklisted
+        self._patch_blacklist = patch("courses.auth.is_token_blacklisted", return_value=False)
         self._patch_log = patch("courses.api.log_activity")
         self._patch_log_learn = patch("courses.api.log_learning_activity")
         self._patch_welcome = patch("courses.api.send_welcome_email")
@@ -46,6 +48,7 @@ class LMSTestCase(TestCase):
 
         self._patch_cache_redis.start()
         self._patch_rate_redis.start()
+        self._patch_blacklist.start()
         self._patch_log.start()
         self._patch_log_learn.start()
         m_welcome = self._patch_welcome.start()
@@ -58,6 +61,7 @@ class LMSTestCase(TestCase):
     def tearDown(self):
         self._patch_cache_redis.stop()
         self._patch_rate_redis.stop()
+        self._patch_blacklist.stop()
         self._patch_log.stop()
         self._patch_log_learn.stop()
         self._patch_welcome.stop()

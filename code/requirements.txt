@@ -11,3 +11,8 @@ celery>=5.3,<6.0
 kombu>=5.3,<6.0
 flower>=2.0,<3.0
 django-cors-headers
+coverage>=7.5,<8.0
+locust>=2.29,<3.0
+factory-boy>=3.3,<4.0
+
+cryptography>=42,<46

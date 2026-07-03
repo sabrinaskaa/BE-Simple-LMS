@@ -32,6 +32,11 @@ class LMSTestCase(TestCase):
         self._patch_rate_redis = patch(
             "courses.rate_limit.get_redis_client", return_value=redis_mock
         )
+        # Patch is_token_blacklisted langsung agar token JWT di test tidak dianggap blacklisted
+        # (is_token_blacklisted melakukan lazy import ke courses.cache yang tidak bisa dipatch via attr)
+        self._patch_blacklist = patch(
+            "courses.auth.is_token_blacklisted", return_value=False
+        )
         # Patch MongoDB logging
         self._patch_log = patch("courses.api.log_activity")
         self._patch_log_learn = patch("courses.api.log_learning_activity")
@@ -42,6 +47,7 @@ class LMSTestCase(TestCase):
 
         self.mock_redis = self._patch_cache_redis.start()
         self._patch_rate_redis.start()
+        self._patch_blacklist.start()
         self.mock_log = self._patch_log.start()
         self.mock_log_learn = self._patch_log_learn.start()
         mock_welcome = self._patch_welcome.start()
@@ -54,6 +60,7 @@ class LMSTestCase(TestCase):
     def tearDown(self):
         self._patch_cache_redis.stop()
         self._patch_rate_redis.stop()
+        self._patch_blacklist.stop()
         self._patch_log.stop()
         self._patch_log_learn.stop()
         self._patch_welcome.stop()

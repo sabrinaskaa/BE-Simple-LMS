@@ -1,0 +1,16 @@
+[run]
+source = .
+omit =
+    */migrations/*
+    */__pycache__/*
+    */settings_test.py
+    manage.py
+    locustfile.py
+
+[report]
+show_missing = True
+skip_covered = False
+fail_under = 80
+
+[html]
+directory = htmlcov

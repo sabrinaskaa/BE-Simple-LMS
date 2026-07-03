@@ -3,20 +3,21 @@ import mimetypes
 import os
 import random
 from datetime import timedelta
-from typing import Optional
+from typing import Optional, List
 
 import jwt
 from celery.result import AsyncResult
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group, User
 from django.db import models as db_models, transaction
-from django.db.models import Avg, Count, Q
+from django.db.models import Avg, Count, Max, Min, F, Q
 from django.utils import timezone
 from django.http import FileResponse
-from ninja import NinjaAPI, UploadedFile, File
+from ninja import NinjaAPI, UploadedFile, File, FilterSchema, Field, Query, Schema
 from ninja.errors import HttpError
+from ninja.pagination import paginate, PageNumberPagination
 
-from .auth import api_auth, create_token, decode_token
+from .auth import api_auth, create_token, decode_token, blacklist_token
 from .cache import (
     cache_get,
     cache_set,
@@ -25,9 +26,12 @@ from .cache import (
     dashboard_cache_key,
     invalidate_course_cache,
     invalidate_dashboard_cache,
+    get_cache_metrics,
+    reset_cache_metrics,
+    write_through_course_detail_cache,
 )
 from .models import (
-    Category, Course, CourseMember, CourseContent, CourseReview,
+    Category, Course, CourseMember, CourseContent, CourseReview, Comment,
     CourseSection, CoursePublishRequest, CoursePrerequisite,
     LessonProgress, Wishlist, Quiz, QuizQuestion, QuizAttempt, QuizAttemptAnswer,
 )
@@ -53,6 +57,7 @@ from .schemas import (
     FileUploadOut,
     LessonProgressItemOut,
     LoginIn,
+    LogoutIn,
     MessageOut,
     PaginatedCategoryOut,
     PaginatedContentOut,
@@ -86,6 +91,9 @@ from .schemas import (
     WishlistOut,
     ChatbotIn,
     ChatbotOut,
+    CommentIn,
+    CommentUpdateIn,
+    CommentOut,
     QuizIn,
     QuizOut,
     QuizUpdateIn,
@@ -107,6 +115,7 @@ from .tasks import (
     run_bulk_reports,
     run_course_report_chain,
     save_report,
+    process_uploaded_material,
     send_enrollment_email,
     send_welcome_email,
     update_course_statistics as update_course_statistics_task,
@@ -131,6 +140,38 @@ def get_object_or_404(model, **kwargs):
         model_name = getattr(model, '__name__', 'Data')
         raise HttpError(404, f"{model_name} tidak ditemukan")
     return obj
+
+
+# ── FILTER SCHEMAS ────────────────────────────────────────────────────────────
+
+class CourseFilter(FilterSchema):
+
+    search: Optional[str] = Field(
+        None,
+        q=["name__icontains", "description__icontains"],
+        description="Cari course berdasarkan nama atau deskripsi",
+    )
+    category_id: Optional[int] = Field(None, description="Filter berdasarkan ID kategori")
+    instructor_id: Optional[int] = Field(None, description="Filter berdasarkan ID instructor/teacher")
+    level: Optional[str] = Field(None, description="beginner, intermediate, atau advanced")
+    status: Optional[str] = Field(None, description="draft, pending_review, published, atau archived")
+    min_price: Optional[int] = Field(None, description="Harga minimum course")
+    max_price: Optional[int] = Field(None, description="Harga maksimum course")
+
+    def filter_instructor_id(self, value: Optional[int]) -> Q:
+        if value is None:
+            return Q()
+        return Q(teacher_id=value)
+
+    def filter_min_price(self, value: Optional[int]) -> Q:
+        if value is None:
+            return Q()
+        return Q(price__gte=value)
+
+    def filter_max_price(self, value: Optional[int]) -> Q:
+        if value is None:
+            return Q()
+        return Q(price__lte=value)
 
 
 # ── ORDERING HELPERS ──────────────────────────────────────────────────────────
@@ -176,13 +217,11 @@ def _validate_section_order(course_id: int, order: int, exclude_id=None):
 
 
 def _validate_positive_order(order):
-    """Tolak order yang bukan integer positif."""
     if order is not None and order < 1:
         raise HttpError(400, "order harus bernilai positif (>= 1)")
 
 
 def _validate_positive_duration(duration):
-    """Tolak duration_minutes yang negatif atau nol."""
     if duration is not None and duration < 1:
         raise HttpError(400, "duration_minutes harus bernilai positif (>= 1)")
 
@@ -294,9 +333,7 @@ def register(request, data: RegisterIn):
     return 201, serialize_user(user)
 
 
-@api.post("/auth/login", response={200: TokenOut, 401: ErrorOut, 429: ErrorOut}, tags=["Authentication"])
-@rate_limit_login()
-def login(request, data: LoginIn):
+def _login_response(data: LoginIn):
     user = authenticate(username=data.username, password=data.password)
     if user is None:
         raise HttpError(401, "Username atau password salah")
@@ -306,6 +343,18 @@ def login(request, data: LoginIn):
         "access": create_token(user, "access"),
         "refresh": create_token(user, "refresh"),
     }
+
+
+@api.post("/auth/login", response={200: TokenOut, 401: ErrorOut, 429: ErrorOut}, tags=["Authentication"])
+@rate_limit_login()
+def login(request, data: LoginIn):
+    return _login_response(data)
+
+
+@api.post("/auth/sign-in", response={200: TokenOut, 401: ErrorOut, 429: ErrorOut}, tags=["Authentication"])
+@rate_limit_login()
+def sign_in_alias(request, data: LoginIn):
+    return _login_response(data)
 
 
 @api.post("/auth/refresh", response={200: AccessTokenOut, 401: ErrorOut}, tags=["Authentication"])
@@ -325,6 +374,22 @@ def refresh_token(request, data: RefreshIn):
         raise HttpError(401, "Refresh token sudah expired")
     except jwt.InvalidTokenError:
         raise HttpError(401, "Refresh token tidak valid")
+
+
+@api.post("/auth/token-refresh", response={200: AccessTokenOut, 401: ErrorOut}, tags=["Authentication"])
+def token_refresh_alias(request, data: RefreshIn):
+    return refresh_token(request, data)
+
+
+@api.post("/auth/logout", auth=api_auth, response={200: MessageOut, 401: ErrorOut}, tags=["Authentication"])
+def logout(request, data: LogoutIn = None):
+    access_token = getattr(request, "auth_token", None)
+    if access_token:
+        blacklist_token(access_token)
+    if data is not None and getattr(data, "refresh", None):
+        blacklist_token(data.refresh)
+    log_activity(request.user, "logout", {})
+    return {"message": "Logout berhasil. Token aktif sudah dicabut."}
 
 
 @api.get("/auth/me", auth=api_auth, response={200: UserOut, 401: ErrorOut}, tags=["Authentication"])
@@ -358,13 +423,7 @@ def update_me(request, data: UserUpdateIn):
 @rate_limit(prefix="courses")
 def list_courses(
     request,
-    search: Optional[str] = None,
-    category_id: Optional[int] = None,
-    instructor_id: Optional[int] = None,
-    level: Optional[str] = None,
-    status: Optional[str] = None,
-    min_price: Optional[int] = None,
-    max_price: Optional[int] = None,
+    filters: CourseFilter = Query(...),
     ordering: str = "-created_at",
     page: int = 1,
     page_size: int = 10,
@@ -374,38 +433,26 @@ def list_courses(
         raise HttpError(400, "Parameter ordering tidak valid")
 
     allowed_levels = {"beginner", "intermediate", "advanced", None}
-    if level not in allowed_levels:
+    if filters.level not in allowed_levels:
         raise HttpError(400, "Level tidak valid. Pilih: beginner, intermediate, advanced")
 
     allowed_statuses = {"draft", "pending_review", "published", "archived", None}
-    if status not in allowed_statuses:
+    if filters.status not in allowed_statuses:
         raise HttpError(400, "Status tidak valid. Pilih: draft, pending_review, published, archived")
 
     page = max(page, 1)
     page_size = max(min(page_size, 100), 1)
     cache_key = course_list_cache_key(
-        search, min_price, max_price, ordering, page, page_size,
-        category_id=category_id, level=level, status=status, instructor_id=instructor_id,
+        filters.search, filters.min_price, filters.max_price, ordering, page, page_size,
+        category_id=filters.category_id, level=filters.level, status=filters.status,
+        instructor_id=filters.instructor_id,
     )
     cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
     qs = Course.objects.select_related("teacher", "category").all()
-    if search:
-        qs = qs.filter(Q(name__icontains=search) | Q(description__icontains=search))
-    if instructor_id is not None:
-        qs = qs.filter(teacher_id=instructor_id)
-    if category_id is not None:
-        qs = qs.filter(category_id=category_id)
-    if level:
-        qs = qs.filter(level=level)
-    if status:
-        qs = qs.filter(status=status)
-    if min_price is not None:
-        qs = qs.filter(price__gte=min_price)
-    if max_price is not None:
-        qs = qs.filter(price__lte=max_price)
+    qs = filters.filter(qs)
 
     qs = qs.order_by(ordering)
     total = qs.count()
@@ -436,6 +483,30 @@ def detail_course(request, course_id: int):
     cache_set(cache_key, response, timeout=300)
     log_activity(getattr(request, 'user', None), "view_course_detail", {"course_id": course_id})
     return response
+
+
+@api.get("/secure/courses", auth=api_auth, response={200: PaginatedCourseOut, 401: ErrorOut, 429: ErrorOut}, tags=["Courses"], summary="Protected alias untuk list course sesuai dokumen Auth")
+@rate_limit(prefix="secure-courses")
+def list_courses_protected(
+    request,
+    filters: CourseFilter = Query(...),
+    ordering: str = "-created_at",
+    page: int = 1,
+    page_size: int = 10,
+):
+    return list_courses(request, filters=filters, ordering=ordering, page=page, page_size=page_size)
+
+
+@api.get("/secure/courses/{course_id}", auth=api_auth, response={200: CourseOut, 401: ErrorOut, 404: ErrorOut}, tags=["Courses"], summary="Protected alias untuk detail course sesuai dokumen Auth")
+def detail_course_protected(request, course_id: int):
+    return detail_course(request, course_id)
+
+
+@api.get("/courses-ninja-pagination", response=List[CourseOut], tags=["Courses"], summary="Demo pagination bawaan Django Ninja dengan @paginate(PageNumberPagination)")
+@paginate(PageNumberPagination, page_size=10)
+def list_courses_ninja_pagination(request):
+    qs = Course.objects.select_related("teacher", "category").order_by("-created_at")
+    return [serialize_course(course) for course in qs]
 
 
 # 3. COURSES PROTECTED ENDPOINTS
@@ -479,9 +550,10 @@ def create_course(request, data: CourseIn):
         level=data.level,
         status=status,
     )
-    invalidate_course_cache(course.id)
+    course_payload = serialize_course(course)
+    write_through_course_detail_cache(course.id, course_payload)
     log_activity(request.user, "create_course", {"course_id": course.id})
-    return 201, serialize_course(course)
+    return 201, course_payload
 
 
 @api.patch("/courses/{course_id}", auth=api_auth, response={200: CourseOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut}, tags=["Courses"])
@@ -545,9 +617,10 @@ def update_course(request, course_id: int, data: CourseUpdateIn):
             course.status = "draft"
 
     course.save()
-    invalidate_course_cache(course.id)
+    course_payload = serialize_course(course)
+    write_through_course_detail_cache(course.id, course_payload)
     log_activity(request.user, "update_course", {"course_id": course.id})
-    return serialize_course(course)
+    return course_payload
 
 
 @api.delete("/courses/{course_id}", auth=api_auth, response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut}, tags=["Courses"])
@@ -1069,10 +1142,135 @@ def learning_report(request, limit: int = 20):
     return get_learning_report(limit=limit)
 
 
+
+# DATABASE OPTIMIZATION LAB ENDPOINTS — versi Django Ninja/Swagger
+
+@api.get("/lab/course-list/baseline", tags=["Database Optimization Lab"], summary="Baseline N+1: course list tanpa select_related")
+def lab_course_list_baseline(request):
+    courses = Course.objects.all()
+    return {"data": [{"course": c.name, "teacher": c.teacher.username} for c in courses]}
+
+
+@api.get("/lab/course-list/optimized", tags=["Database Optimization Lab"], summary="Optimized: course list dengan select_related")
+def lab_course_list_optimized(request):
+    courses = Course.objects.select_related("teacher").all()
+    return {"data": [{"course": c.name, "teacher": c.teacher.username} for c in courses]}
+
+
+@api.get("/lab/course-members/baseline", tags=["Database Optimization Lab"], summary="Baseline N+1: hitung member per course")
+def lab_course_members_baseline(request):
+    payload = []
+    for c in Course.objects.all():
+        payload.append({"course": c.name, "member_count": c.coursemember_set.count()})
+    return {"data": payload}
+
+
+@api.get("/lab/course-members/optimized", tags=["Database Optimization Lab"], summary="Optimized: prefetch_related untuk member per course")
+def lab_course_members_optimized(request):
+    payload = []
+    for c in Course.objects.prefetch_related("coursemember_set").all():
+        payload.append({"course": c.name, "member_count": c.coursemember_set.count()})
+    return {"data": payload}
+
+
+@api.get("/lab/course-dashboard/baseline", tags=["Database Optimization Lab"], summary="Baseline dashboard statistik tanpa aggregate/annotate")
+def lab_course_dashboard_baseline(request):
+    course_data = []
+    prices = []
+    for c in Course.objects.all():
+        member_count = CourseMember.objects.filter(course_id=c).count()
+        course_data.append({"course": c.name, "member_count": member_count, "price": float(c.price)})
+        prices.append(float(c.price))
+    return {
+        "stats": {
+            "total": len(prices),
+            "max_price": max(prices) if prices else 0,
+            "min_price": min(prices) if prices else 0,
+            "avg_price": sum(prices) / len(prices) if prices else 0,
+        },
+        "courses": course_data,
+    }
+
+
+@api.get("/lab/course-dashboard/optimized", tags=["Database Optimization Lab"], summary="Optimized dashboard dengan aggregate dan annotate")
+def lab_course_dashboard_optimized(request):
+    courses = Course.objects.annotate(member_count=Count("coursemember")).order_by("-member_count")
+    stats = Course.objects.aggregate(total=Count("id"), max_price=Max("price"), min_price=Min("price"), avg_price=Avg("price"))
+    return {
+        "stats": stats,
+        "courses": [{"course": c.name, "member_count": c.member_count, "price": float(c.price)} for c in courses],
+    }
+
+
+@api.post("/lab/bulk-insert/baseline", auth=api_auth, tags=["Database Optimization Lab"], summary="Baseline bulk insert: save satu per satu (Admin)")
+@require_admin
+def lab_bulk_insert_baseline(request, quantity: int = 100):
+    course = Course.objects.first()
+    if not course:
+        raise HttpError(404, "Tidak ada course untuk target insert")
+    quantity = max(1, min(quantity, 1000))
+    current_max = CourseContent.objects.filter(course_id=course, section__isnull=True).aggregate(max_order=Max("order"))["max_order"] or 0
+    for i in range(quantity):
+        CourseContent.objects.create(name=f"Baseline Content {i}", description="Generated by lab", course_id=course, order=current_max + i + 1)
+    invalidate_course_cache(course.id)
+    return {"message": "Baseline bulk insert selesai", "created": quantity}
+
+
+@api.post("/lab/bulk-insert/optimized", auth=api_auth, tags=["Database Optimization Lab"], summary="Optimized bulk insert: bulk_create (Admin)")
+@require_admin
+def lab_bulk_insert_optimized(request, quantity: int = 100):
+    course = Course.objects.first()
+    if not course:
+        raise HttpError(404, "Tidak ada course untuk target insert")
+    quantity = max(1, min(quantity, 1000))
+    current_max = CourseContent.objects.filter(course_id=course, section__isnull=True).aggregate(max_order=Max("order"))["max_order"] or 0
+    contents = [
+        CourseContent(name=f"Optimized Content {i}", description="Generated by lab", course_id=course, order=current_max + i + 1)
+        for i in range(quantity)
+    ]
+    CourseContent.objects.bulk_create(contents, batch_size=500)
+    invalidate_course_cache(course.id)
+    return {"message": "Optimized bulk insert selesai", "created": quantity}
+
+
+@api.post("/lab/bulk-update/baseline", auth=api_auth, tags=["Database Optimization Lab"], summary="Baseline bulk update: save satu per satu (Admin)")
+@require_admin
+def lab_bulk_update_baseline(request, multiplier: float = 1.1):
+    updated = 0
+    for c in Course.objects.all():
+        c.price = int(c.price * multiplier)
+        c.save(update_fields=["price"])
+        updated += 1
+    invalidate_course_cache()
+    return {"message": "Baseline bulk update selesai", "updated": updated}
+
+
+@api.post("/lab/bulk-update/optimized", auth=api_auth, tags=["Database Optimization Lab"], summary="Optimized bulk update: QuerySet.update dengan F expression (Admin)")
+@require_admin
+def lab_bulk_update_optimized(request, multiplier: float = 1.1):
+    updated = Course.objects.update(price=F("price") * multiplier)
+    invalidate_course_cache()
+    return {"message": "Optimized bulk update selesai", "updated": updated}
+
+
+# REDIS CACHE METRICS ENDPOINTS
+
+@api.get("/cache/metrics", auth=api_auth, tags=["Redis Cache"], summary="Lihat metrik Redis cache hit/miss (Admin)")
+@require_admin
+def cache_metrics(request):
+    return get_cache_metrics()
+
+
+@api.post("/cache/metrics/reset", auth=api_auth, tags=["Redis Cache"], summary="Reset metrik Redis cache hit/miss (Admin)")
+@require_admin
+def cache_metrics_reset(request):
+    return reset_cache_metrics()
+
+
 # 6. FILE UPLOAD / DOWNLOAD ENDPOINTS
 
-_ALLOWED_EXTENSIONS = {".pdf"}
-_MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB fallback; dioverride dari settings jika tersedia
+_ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".mp4", ".png", ".jpg", ".jpeg"}
+_MAX_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB fallback; dioverride dari settings jika tersedia
 
 
 def _validate_upload(uploaded_file: UploadedFile) -> None:
@@ -1090,14 +1288,16 @@ def _validate_upload(uploaded_file: UploadedFile) -> None:
     # Ekstensi
     _, ext = os.path.splitext(uploaded_file.name or "")
     if ext.lower() not in allowed_exts:
-        raise HttpError(400, "Hanya file PDF yang diizinkan untuk materi kelas.")
+        allowed = ", ".join(sorted(allowed_exts))
+        raise HttpError(400, f"Tipe file tidak diizinkan. Ekstensi yang didukung: {allowed}.")
 
 
 @api.post(
-    "/courses/{course_id}/content/{content_id}/upload",
+    "/courses/{course_id}/contents/{content_id}/upload",
     auth=api_auth,
     response={200: FileUploadOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
     tags=["Files"],
+    summary="Upload file materi ke lesson (Instructor/Admin). Ekstensi: pdf, doc, docx, ppt, pptx, mp4, png, jpg, jpeg. Maks 100 MB.",
 )
 @rate_limit(prefix="upload")
 def upload_content_file(request, course_id: int, content_id: int, file: UploadedFile = File(...)):
@@ -1111,12 +1311,19 @@ def upload_content_file(request, course_id: int, content_id: int, file: Uploaded
 
     _validate_upload(file)
 
-    # Pastikan nama file yang diterima berekstensi .pdf
-    original_name = file.name or "materi"
-    base_name = os.path.splitext(original_name)[0]
-    save_name = base_name + ".pdf"
+    # Hapus file lama jika ada agar tidak menumpuk di storage
+    if content.file_attachment:
+        old_path = content.file_attachment.path
+        if os.path.exists(old_path):
+            os.remove(old_path)
+        content.file_attachment.delete(save=False)
 
-    content.file_attachment.save(save_name, file, save=True)
+    # Simpan file baru dengan ekstensi asli agar materi bisa berupa dokumen, video, atau gambar.
+    original_name = file.name or "materi"
+    content.file_attachment.save(original_name, file, save=True)
+
+    # Dispatch task async untuk log metadata — soft_time_limit mencegah task hang
+    process_uploaded_material.apply_async(args=[content.id], soft_time_limit=60)
     log_activity(request.user, "upload_content_file", {"course_id": course_id, "content_id": content_id})
     return {
         "content_id": content.id,
@@ -1127,11 +1334,11 @@ def upload_content_file(request, course_id: int, content_id: int, file: Uploaded
 
 
 @api.delete(
-    "/courses/{course_id}/content/{content_id}/file",
+    "/courses/{course_id}/contents/{content_id}/file",
     auth=api_auth,
     response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
     tags=["Files"],
-    summary="Hapus file materi PDF dari lesson (Instructor/Admin)",
+    summary="Hapus file materi dari lesson (Instructor/Admin)",
 )
 def delete_content_file(request, course_id: int, content_id: int):
     course = Course.objects.select_related("teacher").filter(id=course_id).first()
@@ -1146,9 +1353,12 @@ def delete_content_file(request, course_id: int, content_id: int):
         raise HttpError(404, "Tidak ada file yang terpasang pada lesson ini")
 
     # Hapus file fisik dari disk
-    file_path = content.file_attachment.path
-    if os.path.exists(file_path):
-        os.remove(file_path)
+    try:
+        file_path = content.file_attachment.path
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception:
+        pass
 
     # Kosongkan field di database
     content.file_attachment.delete(save=False)
@@ -1164,10 +1374,11 @@ def delete_content_file(request, course_id: int, content_id: int):
 
 
 @api.get(
-    "/courses/{course_id}/content/{content_id}/download",
+    "/courses/{course_id}/contents/{content_id}/download",
     auth=api_auth,
     tags=["Files"],
     response={401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    summary="Download file materi lesson. Hanya bisa diakses oleh member yang sudah enroll atau instructor/admin.",
 )
 def download_content_file(request, course_id: int, content_id: int):
     course = get_object_or_404(Course, id=course_id)
@@ -1468,7 +1679,7 @@ def create_or_update_review(request, course_id: int, data: ReviewIn):
     course.rating_avg = round(agg["avg"] or 0, 2)
     course.total_reviews = agg["total"]
     course.save(update_fields=["rating_avg", "total_reviews"])
-    invalidate_course_cache(course.id)
+    write_through_course_detail_cache(course.id, serialize_course(Course.objects.select_related("teacher", "category").get(id=course.id)))
 
     log_activity(request.user, "create_review", {"course_id": course_id, "rating": data.rating})
     return 201, _serialize_review(review)
@@ -1513,10 +1724,115 @@ def delete_review(request, course_id: int, review_id: int):
     course.rating_avg = round(agg["avg"] or 0, 2)
     course.total_reviews = agg["total"]
     course.save(update_fields=["rating_avg", "total_reviews"])
-    invalidate_course_cache(course.id)
+    write_through_course_detail_cache(course.id, serialize_course(Course.objects.select_related("teacher", "category").get(id=course.id)))
 
     log_activity(request.user, "delete_review", {"course_id": course_id, "review_id": review_id})
     return {"message": "Review berhasil dihapus"}
+
+
+
+# ── 7.3B CONTENT COMMENTS — endpoint literal /comments untuk dokumen Auth ────
+
+def _serialize_comment(comment: Comment) -> dict:
+    return {
+        "id": comment.id,
+        "content_id": comment.content_id_id,
+        "member_id": comment.member_id_id,
+        "user_id": comment.member_id.user_id_id,
+        "username": comment.member_id.user_id.username,
+        "comment": comment.comment,
+    }
+
+
+@api.post(
+    "/comments/",
+    auth=api_auth,
+    response={201: CommentOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Comments"],
+    summary="Posting komentar pada lesson/content oleh student yang sudah enroll",
+)
+def create_comment(request, data: CommentIn):
+    content = get_object_or_404(
+        CourseContent.objects.select_related("course_id"),
+        id=data.content_id,
+    )
+    member = CourseMember.objects.select_related("user_id").filter(
+        course_id=content.course_id,
+        user_id=request.user,
+    ).first()
+    if member is None and not is_course_owner_or_admin(request.user, content.course_id):
+        raise HttpError(403, "Harus enroll ke course ini untuk memberi komentar")
+    if member is None:
+        member, _ = CourseMember.objects.get_or_create(
+            course_id=content.course_id,
+            user_id=request.user,
+            defaults={"roles": "ast"},
+        )
+    if not data.comment.strip():
+        raise HttpError(400, "Komentar tidak boleh kosong")
+    comment = Comment.objects.create(content_id=content, member_id=member, comment=data.comment)
+    log_activity(request.user, "create_comment", {"content_id": content.id, "comment_id": comment.id})
+    return 201, _serialize_comment(comment)
+
+
+@api.get(
+    "/comments/",
+    auth=api_auth,
+    tags=["Comments"],
+    summary="List komentar content dengan filter content_id dan pagination",
+)
+def list_comments(request, content_id: Optional[int] = None, page: int = 1, page_size: int = 20):
+    page = max(page, 1)
+    page_size = max(min(page_size, 100), 1)
+    qs = Comment.objects.select_related("content_id", "member_id", "member_id__user_id")
+    if content_id is not None:
+        qs = qs.filter(content_id_id=content_id)
+    total = qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {"total": total, "page": page, "page_size": page_size, "data": [_serialize_comment(c) for c in qs[start:end]]}
+
+
+@api.patch(
+    "/comments/{comment_id}/",
+    auth=api_auth,
+    response={200: CommentOut, 400: ErrorOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Comments"],
+    summary="Update komentar milik sendiri atau admin",
+)
+def update_comment(request, comment_id: int, data: CommentUpdateIn):
+    comment = get_object_or_404(
+        Comment.objects.select_related("member_id", "member_id__user_id", "content_id", "content_id__course_id"),
+        id=comment_id,
+    )
+    if comment.member_id.user_id_id != request.user.id and not is_admin(request.user):
+        raise HttpError(403, "Hanya pemilik komentar atau admin yang boleh mengubah")
+    if data.comment is None or not data.comment.strip():
+        raise HttpError(400, "Komentar tidak boleh kosong")
+    comment.comment = data.comment
+    comment.save(update_fields=["comment"])
+    log_activity(request.user, "update_comment", {"comment_id": comment.id})
+    return _serialize_comment(comment)
+
+
+@api.delete(
+    "/comments/{comment_id}/",
+    auth=api_auth,
+    response={200: MessageOut, 401: ErrorOut, 403: ErrorOut, 404: ErrorOut},
+    tags=["Comments"],
+    summary="Hapus komentar milik sendiri, owner course, atau admin",
+)
+def delete_comment(request, comment_id: int):
+    comment = get_object_or_404(
+        Comment.objects.select_related("member_id", "content_id", "content_id__course_id"),
+        id=comment_id,
+    )
+    course = comment.content_id.course_id
+    if comment.member_id.user_id_id != request.user.id and not is_course_owner_or_admin(request.user, course):
+        raise HttpError(403, "Hanya pemilik komentar, owner course, atau admin yang boleh menghapus")
+    comment.delete()
+    log_activity(request.user, "delete_comment", {"comment_id": comment_id})
+    return {"message": "Komentar berhasil dihapus"}
 
 
 # ── 7.4 WISHLIST ─────────────────────────────────────────────────────────────
@@ -1889,8 +2205,6 @@ def _serialize_prerequisite(prereq: CoursePrerequisite) -> dict:
 
 
 def _has_circular_dependency(course_id: int, required_course_id: int) -> bool:
-    """Check apakah menambah required_course_id sebagai prerequisite course_id akan membuat circular dependency."""
-    # BFS/DFS: cari apakah course_id sudah merupakan (langsung/tidak langsung) prerequisite dari required_course_id
     visited = set()
     queue = [required_course_id]
     while queue:

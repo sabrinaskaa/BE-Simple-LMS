@@ -376,3 +376,36 @@ def run_bulk_reports(course_ids: list):
         generate_course_report.s(course_id)
         for course_id in course_ids
     )()
+
+# =============================================================================
+# Task 11: Async File Processing (upload metadata / future conversion hook)
+# =============================================================================
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def process_uploaded_material(self, content_id: int):
+    try:
+        from courses.models import CourseContent
+        from courses.mongo import log_activity
+
+        content = CourseContent.objects.select_related("course_id", "course_id__teacher").get(id=content_id)
+        if not content.file_attachment:
+            return {"status": "skipped", "reason": "no_file", "content_id": content_id}
+
+        file_path = Path(content.file_attachment.path)
+        metadata = {
+            "content_id": content.id,
+            "course_id": content.course_id_id,
+            "filename": file_path.name,
+            "extension": file_path.suffix.lower(),
+            "size_bytes": file_path.stat().st_size if file_path.exists() else None,
+            "processed_at": datetime.now().isoformat(),
+        }
+
+        try:
+            log_activity(content.course_id.teacher, "process_uploaded_material", metadata)
+        except Exception:
+            pass
+
+        return {"status": "processed", "metadata": metadata}
+    except Exception as exc:
+        raise self.retry(exc=exc)

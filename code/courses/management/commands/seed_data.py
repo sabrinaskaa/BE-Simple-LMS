@@ -53,6 +53,13 @@ QUIZ_TEMPLATES = [
 class Command(BaseCommand):
     help = 'Seed database Simple LMS dengan course, section, artikel lesson, quiz, dan question bank.'
 
+    def add_arguments(self, parser):
+        parser.add_argument('--teachers', type=int, default=20, help='Jumlah instructor minimal untuk seed besar')
+        parser.add_argument('--students', type=int, default=200, help='Jumlah student untuk membuat enrollment')
+        parser.add_argument('--courses', type=int, default=100, help='Jumlah course minimal untuk optimasi database')
+        parser.add_argument('--members', type=int, default=500, help='Jumlah enrollment/course member minimal')
+        parser.add_argument('--comments', type=int, default=1000, help='Jumlah komentar lesson minimal')
+
     def handle(self, *args, **options):
         random.seed(42)
         self.stdout.write(self.style.HTTP_INFO('=' * 60))
@@ -61,23 +68,23 @@ class Command(BaseCommand):
 
         with transaction.atomic():
             groups = self._seed_groups()
-            teachers = self._seed_teachers(groups['instructor'])
-            students = self._seed_students(groups['student'])
+            teachers = self._seed_teachers(groups['instructor'], options['teachers'])
+            students = self._seed_students(groups['student'], options['students'])
             categories = self._seed_categories()
-            courses = self._seed_courses(teachers, categories)
+            courses = self._seed_courses(teachers, categories, options['courses'])
             self._seed_curriculum(courses)
-            members = self._seed_members(courses, students)
+            members = self._seed_members(courses, students, options['members'])
             self._seed_reviews(courses, members)
             self._seed_wishlist(courses, students)
-            self._seed_comments(courses, members)
+            self._seed_comments(courses, members, options['comments'])
             self._seed_progress_demo(courses, students)
 
         self._print_summary()
         self.stdout.write('')
         self.stdout.write(self.style.SUCCESS('Seeding selesai!'))
         self.stdout.write('  Admin     : admin / admin123')
-        self.stdout.write('  Instructor: dosen01 - dosen06 / password123')
-        self.stdout.write('  Student   : mhs001 - mhs020 / password123')
+        self.stdout.write(f'  Instructor: dosen01 - dosen{options["teachers"]:02d} / password123')
+        self.stdout.write(f'  Student   : mhs001 - mhs{options["students"]:03d} / password123')
 
     def _seed_groups(self):
         self.stdout.write('\n[1/10] Menyiapkan role...')
@@ -99,10 +106,10 @@ class Command(BaseCommand):
             admin_user.groups.add(admin_group)
         return {'admin': admin_group, 'instructor': instructor_group, 'student': student_group}
 
-    def _seed_teachers(self, instructor_group):
+    def _seed_teachers(self, instructor_group, target_count=20):
         self.stdout.write('[2/10] Menyiapkan instructor...')
         teachers = []
-        for i in range(1, 7):
+        for i in range(1, target_count + 1):
             username = f'dosen{i:02d}'
             user, _ = User.objects.get_or_create(
                 username=username,
@@ -117,10 +124,10 @@ class Command(BaseCommand):
             teachers.append(user)
         return teachers
 
-    def _seed_students(self, student_group):
+    def _seed_students(self, student_group, target_count=200):
         self.stdout.write('[3/10] Menyiapkan student...')
         students = []
-        for i in range(1, 21):
+        for i in range(1, target_count + 1):
             username = f'mhs{i:03d}'
             user, _ = User.objects.get_or_create(
                 username=username,
@@ -150,10 +157,14 @@ class Command(BaseCommand):
             categories[name] = cat
         return categories
 
-    def _seed_courses(self, teachers, categories):
+    def _seed_courses(self, teachers, categories, target_count=100):
         self.stdout.write('[5/10] Menyiapkan course published...')
         courses = []
-        for idx, (name, category_name, description) in enumerate(COURSE_DATA):
+        category_names = list(categories.keys())
+        for idx in range(target_count):
+            base_name, category_name, description = COURSE_DATA[idx % len(COURSE_DATA)]
+            name = base_name if idx < len(COURSE_DATA) else f'{base_name} #{idx + 1:03d}'
+            category_name = category_name if category_name in categories else category_names[idx % len(category_names)]
             course, created = Course.objects.get_or_create(
                 name=name,
                 defaults={
@@ -254,13 +265,21 @@ class Command(BaseCommand):
                             points=1,
                         )
 
-    def _seed_members(self, courses, students):
+    def _seed_members(self, courses, students, target_count=500):
         self.stdout.write('[7/10] Menyiapkan enrollment...')
-        members = []
-        for student in students:
-            for course in random.sample(courses, k=min(3, len(courses))):
-                member, _ = CourseMember.objects.get_or_create(course_id=course, user_id=student, defaults={'roles': 'std'})
-                members.append(member)
+        members = list(CourseMember.objects.select_related('course_id', 'user_id').all()[:target_count])
+        seen = {(m.course_id_id, m.user_id_id) for m in members}
+        attempts = 0
+        while len(members) < target_count and attempts < target_count * 20:
+            attempts += 1
+            student = random.choice(students)
+            course = random.choice(courses)
+            key = (course.id, student.id)
+            if key in seen:
+                continue
+            member, _ = CourseMember.objects.get_or_create(course_id=course, user_id=student, defaults={'roles': 'std'})
+            members.append(member)
+            seen.add(key)
         return members
 
     def _seed_reviews(self, courses, members):
@@ -291,13 +310,32 @@ class Command(BaseCommand):
             for course in random.sample(courses, k=min(2, len(courses))):
                 Wishlist.objects.get_or_create(user=student, course=course)
 
-    def _seed_comments(self, courses, members):
+    def _seed_comments(self, courses, members, target_count=1000):
         self.stdout.write('[10/10] Menyiapkan komentar lesson...')
         comments = ['Materinya jelas.', 'Saya akan ulangi sebelum kuis.', 'Contohnya membantu.', 'Bagian ini penting untuk dipahami.']
-        for member in members[:80]:
-            lesson = CourseContent.objects.filter(course_id=member.course_id).order_by('?').first()
-            if lesson:
-                Comment.objects.get_or_create(content_id=lesson, member_id=member, comment=random.choice(comments))
+        existing = Comment.objects.count()
+        if existing >= target_count:
+            return
+        lessons_by_course = {
+            course.id: list(CourseContent.objects.filter(course_id=course))
+            for course in courses
+        }
+        batch = []
+        for i in range(target_count - existing):
+            member = random.choice(members)
+            lessons = lessons_by_course.get(member.course_id_id) or []
+            if not lessons:
+                continue
+            batch.append(Comment(
+                content_id=random.choice(lessons),
+                member_id=member,
+                comment=f'{random.choice(comments)} #{existing + i + 1}',
+            ))
+            if len(batch) >= 500:
+                Comment.objects.bulk_create(batch, batch_size=500)
+                batch = []
+        if batch:
+            Comment.objects.bulk_create(batch, batch_size=500)
 
     def _seed_progress_demo(self, courses, students):
         demo_student = students[0] if students else None

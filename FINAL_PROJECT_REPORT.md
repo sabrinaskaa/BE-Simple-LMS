@@ -73,10 +73,10 @@ Untuk Paket 1 (LMS Experience), project ini mengimplementasikan fitur advanced s
 
 ### 1. Search, Filter, dan Sorting Course Lanjutan
 
-Endpoint `GET /api/v1/courses` mendukung semua parameter yang diminta rubrik. Implementasi menggunakan Django ORM dengan kondisi `Q()` untuk full-text search, dan chaining `.filter()` untuk setiap filter yang disediakan. Filter kosong/tidak diisi tidak akan mengakibatkan error karena setiap filter dicek terlebih dahulu sebelum diterapkan ke queryset.
+Endpoint `GET /api/v1/courses` mendukung semua parameter yang diminta rubrik. Implementasi terbaru memakai `CourseFilter(FilterSchema)` dari Django Ninja untuk filtering deklaratif. Field `search` dipetakan ke `name__icontains` dan `description__icontains`, sedangkan `instructor_id`, `min_price`, dan `max_price` memakai custom filter method berbasis `Q()` agar tetap aman. Filter kosong/tidak diisi tidak akan mengakibatkan error karena `FilterSchema` mengembalikan kondisi kosong untuk nilai yang tidak dikirim.
 
-- **Search**: `Q(name__icontains=search) | Q(description__icontains=search)`
-- **Filter**: `category_id`, `instructor_id` (teacher_id), `level`, `status`, `min_price`, `max_price`
+- **Search**: `CourseFilter.search` dengan `Field(q=["name__icontains", "description__icontains"])`
+- **Filter**: `CourseFilter(FilterSchema)` untuk `category_id`, `instructor_id` (teacher_id), `level`, `status`, `min_price`, `max_price`
 - **Sorting**: `ordering` dari whitelist `{name, -name, price, -price, created_at, -created_at, rating_avg, -rating_avg}`
 - **Validasi**: level/status yang tidak valid langsung return `400 Bad Request`
 - **Pagination**: `page`, `page_size` dengan metadata `total`, `page`, `page_size`
@@ -600,3 +600,120 @@ Integrasi antarmuka chat dibangun secara kustom di sisi frontend:
 Project Simple LMS Extended Backend berhasil mengimplementasikan semua 4 fitur Paket 1 dengan total 51 poin, ditambah dua fitur backend lanjutan: **Publishing Workflow** (approval flow sebelum publish) dan **Course Prerequisites** (validasi prasyarat saat enrollment). Hal yang paling dipelajari adalah pentingnya membaca kode existing sebelum mengimplementasikan fitur baru — sebagian besar infrastruktur (models, cache, permissions) sudah tersedia, sehingga fokus bisa pada gap analysis dan penyempurnaan detail.
 
 Tantangan terbesar adalah memastikan konsistensi format response antara schema Pydantic dan data yang dikembalikan dari ORM, terutama untuk progress detail yang memerlukan nested structure (sections → lessons). Ke depannya, dapat ditingkatkan dengan menambahkan background task Celery untuk recalculate statistik dashboard secara berkala agar tidak bergantung sepenuhnya pada cache.
+
+
+---
+
+## Update Terbaru: Penyesuaian Gap Dokumen Penilaian
+
+Bagian ini menjelaskan update yang ditambahkan setelah evaluasi dokumen Optimasi Database, Advanced API Features, Automated Testing, Redis, MongoDB, dan Message Brokers & Async Tasks. Update hanya difokuskan pada item yang belum lengkap atau belum terlihat, tanpa menghapus fitur LMS yang sudah ada.
+
+### 1. Optimasi Database
+
+Seeder `seed_data.py` diperbesar agar data pengujian performa lebih sesuai dengan kebutuhan dokumen optimasi database. Secara default, command berikut:
+
+```bash
+python manage.py seed_data
+```
+
+akan membuat dataset besar: 20 instructor, 200 student, 100 course, minimal 500 enrollment, 800+ lesson/content, dan minimal 1000 komentar. Selain itu, ditambahkan command benchmark:
+
+```bash
+python manage.py benchmark_lms --iterations 5
+```
+
+yang menghasilkan laporan markdown di `docs/BENCHMARK_RESULTS.md` untuk membandingkan response awal dan response warm/cache.
+
+### 2. Advanced API Features
+
+Upload file materi diperbaiki agar tidak hanya berorientasi PDF. Backend sekarang membaca `ALLOWED_UPLOAD_EXTENSIONS` dari environment dan mendukung `.pdf`, `.doc`, `.docx`, `.ppt`, `.pptx`, `.mp4`, `.png`, `.jpg`, dan `.jpeg`. Frontend juga diperbarui agar input upload menerima tipe file tersebut.
+
+### 3. Automated Testing
+
+Konfigurasi testing diperkuat dengan:
+
+- `.coveragerc` dengan target minimal coverage 80%
+- dependency `coverage` untuk laporan coverage
+- dependency `locust` untuk load testing
+- dependency `factory-boy` untuk pengembangan fixture/factory test
+- `locustfile.py` untuk simulasi load test endpoint course list, search/sorting/pagination, dan analytics popular courses
+
+### 4. Redis
+
+Redis tidak hanya dipakai untuk cache dan rate limit, tetapi sekarang juga memiliki cache metrics sederhana. Endpoint admin baru:
+
+```text
+GET  /api/v1/cache/metrics
+POST /api/v1/cache/metrics/reset
+```
+
+menampilkan hit, miss, total request cache, dan hit rate percent. Ini membantu pembuktian peningkatan performa sebelum/sesudah cache.
+
+### 5. MongoDB
+
+MongoDB analytics diperkuat dengan index tambahan untuk `activity_logs` dan `request_logs`. Selain summary analytics, admin sekarang bisa melihat raw logs melalui:
+
+```text
+GET    /api/v1/analytics/activity-logs/
+PATCH  /api/v1/analytics/activity-logs/{log_id}/
+DELETE /api/v1/analytics/activity-logs/{log_id}/
+GET    /api/v1/analytics/request-logs/
+```
+
+Dengan ini, implementasi CRUD MongoDB menjadi lebih terlihat di Swagger.
+
+### 6. Message Broker & Async Task
+
+RabbitMQ credential dipindahkan ke `.env`, lalu Celery routing ditambahkan untuk queue:
+
+```text
+default, emails, reports, certificates, maintenance
+```
+
+Worker Docker Compose juga disesuaikan agar mengonsumsi queue tersebut. Dengan ini, pembagian async task seperti email, laporan, sertifikat, dan maintenance lebih jelas ketika dipantau lewat Flower atau RabbitMQ Management UI.
+
+### 7. Authentication & Authorization
+
+Endpoint lama tetap dipertahankan, tetapi ditambahkan alias agar kompatibel dengan penamaan dokumen:
+
+```text
+POST /api/v1/auth/sign-in
+POST /api/v1/auth/token-refresh
+```
+
+Selain itu, ditambahkan:
+
+```text
+POST /api/v1/auth/logout
+```
+
+yang melakukan blacklist access token dan refresh token opsional di Redis sampai token expired. Token baru juga memiliki `jti` sebagai unique token identifier.
+
+### 8. Dokumentasi Tambahan
+
+Dua file dokumentasi baru ditambahkan:
+
+```text
+docs/IMPLEMENTATION_GAP_UPDATES.md
+docs/TESTING_AND_BENCHMARK_GUIDE.md
+```
+
+Keduanya menjelaskan cara menjalankan seed besar, benchmark, coverage, Locust, Redis metrics, MongoDB raw logs, serta monitoring RabbitMQ/Flower.
+
+## Update v3 — Penyelarasan Akhir dengan Dokumen Penilaian
+
+Pada versi v3, sisa gap dari dokumen-dokumen penilaian ditutup melalui perubahan berikut:
+
+1. Endpoint lab optimasi database dipublikasikan ke Swagger `/api/v1/docs` dengan prefix `/api/v1/lab/...`.
+2. File upload lesson kini mempertahankan ekstensi asli file dan tidak lagi dipaksa menjadi `.pdf`.
+3. Rate limiting menambahkan header `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, dan `Retry-After`.
+4. Endpoint demo Django Ninja pagination tersedia melalui `/api/v1/courses-ninja-pagination` dengan decorator `@paginate(PageNumberPagination)`.
+5. API versioning paralel tersedia di `/api/v2/docs`.
+6. Endpoint literal `/api/v1/comments/` ditambahkan untuk komentar content-level dengan RBAC owner/admin/student enrolled.
+7. JWT custom PyJWT mendukung HS256 dan RS256; command `make_rsa` ditambahkan untuk membuat RSA key pair.
+8. Factory Boy dipakai melalui `courses/factories.py`, serta workflow CI/CD testing tersedia di `.github/workflows/django-tests.yml`.
+9. Redis write-through cache diterapkan pada detail course setelah create/update/recalculate rating.
+10. MongoDB benchmark command tersedia melalui `python manage.py benchmark_mongo`.
+11. Celery RabbitMQ queue diperluas dengan `uploads` dan `dead_letter`; task `process_uploaded_material` berjalan asynchronous setelah upload materi.
+
+Dengan update ini, implementasi backend lebih selaras dengan materi Optimasi Database, Authentication & Authorization, Advanced API Features, Automated Testing, Redis, MongoDB, dan Message Brokers & Async Tasks.

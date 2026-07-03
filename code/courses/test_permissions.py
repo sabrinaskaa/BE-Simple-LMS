@@ -29,6 +29,8 @@ class LMSTestCase(TestCase):
 
         self._patch_cache_redis = patch("courses.cache.get_redis_client", return_value=redis_mock)
         self._patch_rate_redis = patch("courses.rate_limit.get_redis_client", return_value=redis_mock)
+        # Patch is_token_blacklisted langsung agar token JWT di test tidak dianggap blacklisted
+        self._patch_blacklist = patch("courses.auth.is_token_blacklisted", return_value=False)
         self._patch_log = patch("courses.api.log_activity")
         self._patch_log_learn = patch("courses.api.log_learning_activity")
         self._patch_welcome = patch("courses.api.send_welcome_email")
@@ -37,6 +39,7 @@ class LMSTestCase(TestCase):
 
         self._patch_cache_redis.start()
         self._patch_rate_redis.start()
+        self._patch_blacklist.start()
         self._patch_log.start()
         self._patch_log_learn.start()
         m_welcome = self._patch_welcome.start()
@@ -49,6 +52,7 @@ class LMSTestCase(TestCase):
     def tearDown(self):
         self._patch_cache_redis.stop()
         self._patch_rate_redis.stop()
+        self._patch_blacklist.stop()
         self._patch_log.stop()
         self._patch_log_learn.stop()
         self._patch_welcome.stop()
@@ -103,19 +107,31 @@ class RBACCreateCourseTest(LMSTestCase):
         self.admin = self.make_user("rbac_admin")
         self.admin.is_superuser = True
         self.admin.save()
-        self.course_data = {
-            "name": "RBAC Test Course",
+        # Instructor hanya boleh membuat course dengan status draft (bukan published)
+        # Published harus lewat alur review admin
+        self.instructor_course_data = {
+            "name": "RBAC Instructor Course",
+            "description": "Deskripsi",
+            "price": 50000,
+            "level": "beginner",
+            "status": "draft",
+        }
+        # Admin boleh langsung published
+        self.admin_course_data = {
+            "name": "RBAC Admin Course",
             "description": "Deskripsi",
             "price": 50000,
             "level": "beginner",
             "status": "published",
         }
+        # Student mencoba membuat course — ditolak terlepas dari status
+        self.course_data = self.instructor_course_data
 
     def test_instructor_bisa_buat_course(self):
         token = self.get_token(self.instructor)
         response = self.client.post(
             self.url,
-            data=json.dumps(self.course_data),
+            data=json.dumps(self.instructor_course_data),
             content_type="application/json",
             HTTP_AUTHORIZATION=f"Bearer {token}",
         )

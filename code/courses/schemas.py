@@ -32,6 +32,10 @@ class RefreshIn(Schema):
     refresh: str
 
 
+class LogoutIn(Schema):
+    refresh: Optional[str] = None
+
+
 class TokenOut(Schema):
     access: str
     refresh: str
@@ -405,6 +409,24 @@ class LearningMapOut(Schema):
 class ReviewIn(Schema):
     rating: int
     review: str = ""
+
+
+class CommentIn(Schema):
+    content_id: int
+    comment: str
+
+
+class CommentUpdateIn(Schema):
+    comment: Optional[str] = None
+
+
+class CommentOut(Schema):
+    id: int
+    content_id: int
+    member_id: int
+    user_id: int
+    username: str
+    comment: str
 
 
 class ReviewOut(Schema):

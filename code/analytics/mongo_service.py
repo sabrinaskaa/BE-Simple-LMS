@@ -61,7 +61,22 @@ def ensure_indexes() -> None:
             background=True,
         )
 
-        logger.info("[MongoDB] Indexes berhasil dibuat/diverifikasi pada activity_logs")
+
+        req = get_analytics_db().request_logs
+        req.create_index("timestamp", background=True)
+        req.create_index("user_id", background=True)
+        req.create_index("path", background=True)
+        req.create_index("status_code", background=True)
+        req.create_index(
+            [("path", ASCENDING), ("timestamp", DESCENDING)],
+            background=True,
+        )
+        req.create_index(
+            [("status_code", ASCENDING), ("timestamp", DESCENDING)],
+            background=True,
+        )
+
+        logger.info("[MongoDB] Indexes berhasil dibuat/diverifikasi pada activity_logs dan request_logs")
     except (ConnectionFailure, OperationFailure) as e:
         logger.warning(f"[MongoDB] Gagal membuat indexes (MongoDB mungkin belum ready): {e}")
     except Exception as e:
@@ -376,3 +391,38 @@ def get_daily_activity_summary(
     except (ConnectionFailure, OperationFailure) as e:
         logger.error(f"[MongoDB] get_daily_activity_summary gagal: {e}")
         return []
+
+
+# =============================================================================
+# Request Logs — raw log admin endpoint helpers
+# =============================================================================
+
+def find_request_logs(
+    filter_query: Optional[Dict] = None,
+    projection: Optional[Dict] = None,
+    sort_field: str = "timestamp",
+    sort_direction: int = DESCENDING,
+    limit: int = 20,
+    skip: int = 0,
+) -> List[Dict]:
+    try:
+        col = get_analytics_db().request_logs
+        cursor = col.find(filter_query or {}, projection)
+        cursor = cursor.sort(sort_field, sort_direction).skip(skip).limit(limit)
+        docs = []
+        for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            docs.append(doc)
+        return docs
+    except (ConnectionFailure, OperationFailure) as e:
+        logger.error(f"[MongoDB] find_request_logs gagal: {e}")
+        return []
+
+
+def count_request_logs(filter_query: Optional[Dict] = None) -> int:
+    try:
+        col = get_analytics_db().request_logs
+        return col.count_documents(filter_query or {})
+    except (ConnectionFailure, OperationFailure) as e:
+        logger.error(f"[MongoDB] count_request_logs gagal: {e}")
+        return 0
