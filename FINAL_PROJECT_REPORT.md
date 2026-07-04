@@ -9,6 +9,7 @@
 - **Kelas**: A11.4618 — Pemrograman Sisi Server
 - **URL Repository**: https://github.com/sabrinaskaa/BE-Simple-LMS
 - **Deployment Link**: https://fe-simple-lms.vercel.app/
+- **Backend Link**: https://be-simple-lms.onrender.com/
 
 ---
 
