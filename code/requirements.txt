@@ -16,3 +16,4 @@ locust>=2.29,<3.0
 factory-boy>=3.3,<4.0
 
 cryptography>=42,<46
+gunicorn>=21,<23

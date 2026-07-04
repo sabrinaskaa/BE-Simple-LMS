@@ -103,6 +103,9 @@ DATABASES = {
         "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "postgres"),
         "HOST": os.environ.get("POSTGRES_HOST", "database"),
         "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+        "OPTIONS": {
+            "sslmode": os.environ.get("POSTGRES_SSLMODE", "prefer"),
+        },
     }
 }
 
@@ -188,6 +191,9 @@ MAX_UPLOAD_SIZE_BYTES = int(os.environ.get("MAX_UPLOAD_SIZE_BYTES", str(100 * 10
 # Security headers (aktif di production / non-DEBUG)
 # =============================================================================
 if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    USE_X_FORWARDED_HOST = True
+
     SECURE_HSTS_SECONDS = 31536000          # 1 tahun
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
@@ -290,5 +296,12 @@ CELERY_BEAT_SCHEDULE = {
         'args': (),
     },
 }
+
+CELERY_TASK_ALWAYS_EAGER = os.environ.get(
+    "CELERY_TASK_ALWAYS_EAGER",
+    "False"
+).lower() in ("true", "1", "yes")
+
+CELERY_TASK_EAGER_PROPAGATES = False
 
 CORS_ALLOW_ALL_ORIGINS = True  # Izinkan semua frontend (Vercel) untuk mengakses API
